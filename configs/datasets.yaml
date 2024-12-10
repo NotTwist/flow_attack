@@ -1,0 +1,20 @@
+datasets:
+  sintel_mpi:
+    root: "/path/to/sintel"
+    split: "training"
+    dstype: "clean"
+    has_gt: true
+    frames: 2
+
+  kitti15:
+    root: "/path/to/kitti"
+    split: "training"
+    has_gt: true
+    frames: 2
+
+  demo:
+    root: "/path/to/demo"
+    split: "eval"
+    has_gt: false
+    n_images: -1
+    frames: 2
