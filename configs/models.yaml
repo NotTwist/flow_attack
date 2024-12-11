@@ -36,3 +36,21 @@ models:
       rgb_max: 255.0
     weights_path: "models/_pretrained_weights/FlowNet2_checkpoint.pth.tar"
     other_args: {}
+  MeFlow:
+    config:
+      downsample_factor: 8
+      feature_channels: 128
+      corr_radius: 4
+      hidden_dim: 128
+      context_dim: 128
+      gamma: 0.8  # Exponential weighting
+
+      mixed_precision: false
+
+      # Distributed training
+      local_rank: 0,
+
+      # Misc
+      count_time: False,
+    weights_path: "models/_pretrained_weights/sintel.pth"
+    other_args: {}

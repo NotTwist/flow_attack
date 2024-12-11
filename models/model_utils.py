@@ -1,6 +1,8 @@
 import torch
 import yaml
 import os
+from argparse import Namespace
+
 
 def get_config_path(config_name="models.yaml"):
     """Returns the absolute path to the configuration file located in the configs folder."""
@@ -231,6 +233,15 @@ def import_and_load(net='RAFT', make_unit_input=False, variable_change=False, de
                 weights = torch.load(weights_path, map_location=device)
                 model.load_state_dict(weights['state_dict'])
                 model.to(device)
+            elif net == 'MeFlow':
+                from models.models.MeFlow.meflow import build_model
+                model = build_model(Namespace(**config))
+                checkpoint = torch.load(weights_path, map_location=device)
+                weights = checkpoint['model'] if 'model' in checkpoint else checkpoint
+                model.load_state_dict(weights, strict=False)
+                model.to(device)
+            elif net == 'MemFlow':
+                pass
             # TODO add other models
             if model is None:
                 raise RuntimeWarning(

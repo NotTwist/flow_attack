@@ -10,6 +10,9 @@
 1. <s>Finish model loading (add yaml file loading with arguments to import and load)</s>
 2. <s>Add flow viz with flow_library</s>
 3. Test model loading with datasets
-4. Move MemFlow weights to _pretrained_weights folder
-5. Add logging with mlflow
-6. Create baseattack class
+4. Add MeFlow
+5. Move MemFlow weights to _pretrained_weights folder
+6. Add logging with mlflow
+7. Create baseattack class
+8. Add flow_benchmark models
+9. Create argparse
