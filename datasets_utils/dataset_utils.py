@@ -1,10 +1,9 @@
-import datasets
+from . import datasets
 from torch.utils.data import DataLoader, Subset
 import numpy as np
 
 import yaml
 import os
-
 
 def get_config_path(config_name="datasets.yaml"):
     """Returns the absolute path to the configuration file located in the configs folder."""
@@ -12,7 +11,7 @@ def get_config_path(config_name="datasets.yaml"):
     project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
     # Build the path to the config folder
-    config_dir = os.path.join(project_root, "datasets")
+    config_dir = os.path.join(project_root, "configs")
 
     # Build the full path to the config file
     config_path = os.path.join(config_dir, config_name)

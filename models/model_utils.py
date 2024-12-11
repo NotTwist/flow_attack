@@ -186,7 +186,7 @@ def import_and_load(net='RAFT', make_unit_input=False, variable_change=False, de
 
     # Scaled input model logic
     if make_unit_input or variable_change or make_scaled_input_model:
-        from scaledInputModel import ScaledInputModel
+        from models.scaledInputModel import ScaledInputModel 
         model = ScaledInputModel(net, make_unit_input=make_unit_input,
                                  variable_change=variable_change, device=device, **kwargs)
         print(
@@ -196,13 +196,13 @@ def import_and_load(net='RAFT', make_unit_input=False, variable_change=False, de
         try:
             # Loading model based on the configuration
             if net == 'RAFT':
-                from models.raft.raft import RAFT
+                from models.models.raft.raft import RAFT
                 model = torch.nn.DataParallel(RAFT(config))
                 model.load_state_dict(torch.load(
                     weights_path, map_location=device))
 
             elif net == 'GMA':
-                from models.gma.network import RAFTGMA
+                from models.models.gma.network import RAFTGMA
                 # Use Namespace to pass config as args
                 config = Namespace(**config)
 
@@ -211,7 +211,7 @@ def import_and_load(net='RAFT', make_unit_input=False, variable_change=False, de
                     weights_path, map_location=device))
 
             elif net == 'PWCNet':
-                from models.PWCNet.PWCNet import PWCDCNet
+                from models.models.PWCNet.PWCNet import PWCDCNet
                 model = PWCDCNet()
                 weights = torch.load(weights_path, map_location=device)
                 if 'state_dict' in weights.keys():
@@ -221,12 +221,12 @@ def import_and_load(net='RAFT', make_unit_input=False, variable_change=False, de
                 model.to(device)
 
             elif net == 'SpyNet':
-                from models.SpyNet.SpyNet import Network as SpyNet
+                from models.models.SpyNet.SpyNet import Network as SpyNet
                 model = SpyNet(nlevels=6, pretrained=True)
                 model.to(device)
 
             elif net == "FlowNet2":
-                from models.FlowNet.FlowNet2 import FlowNet2
+                from models.models.FlowNet.FlowNet2 import FlowNet2
                 model = FlowNet2(Namespace(**config), div_flow=20, batchNorm=False)
                 weights = torch.load(weights_path, map_location=device)
                 model.load_state_dict(weights['state_dict'])

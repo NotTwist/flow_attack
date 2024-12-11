@@ -22,6 +22,8 @@ models:
 
   PWCNet:
     weights_path: "models/_pretrained_weights/pwc_net_chairs.pth.tar"
+    correlationSamplerOnlyCPU: false
+    useCPU: false
     other_args: {}
 
   SpyNet:

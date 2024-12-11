@@ -1,3 +1,11 @@
+from PIL import Image
+import torch.nn.functional as F
+import os
+import sys
+sys.path.append("flow_library")
+from flow_library.flow_plot import colorplot_light
+import numpy as np
+
 class InputPadder:
     """Pads images such that dimensions are divisible by divisor
 
@@ -120,3 +128,42 @@ def model_takes_unit_input(model):
     if model in ["PWCNet", "SpyNet"]:
         model_takes_unit_input = True
     return model_takes_unit_input
+
+
+def quickvis_flow(flow, filename, auto_scale=True, max_scale=-1):
+    """Saves a flow field tensor with two dimensions as image to a specified file location.
+
+    Args:
+            flow (tensor):
+                    2-dimensional tensor (c=2), following the dimension order (c,H,W) or (1,c,H,W)
+            filename (str):
+                    name for the image to save, including path and file extension.
+            auto_scale (bool, optional):
+                    automatically scale color values. Defaults to True.
+            max_scale (int, optional):
+                    if auto_scale is false, scale flow by this value. Defaults to -1.
+    """
+    valid = False
+    if len(flow.size()) == 3:
+        flow_img = flow.clone().detach().cpu().numpy()
+        valid = True
+
+    elif len(flow.size()) == 4 and flow.size()[0] == 1:
+        flow_img = flow[0, :, :, :].clone().detach().cpu().numpy()
+        valid = True
+
+    else:
+        print("Encountered invalid tensor dimensions %s, abort printing." %
+              str(flow.size()))
+
+    if valid:
+        # make directory and ignore if it exists
+        if not os.path.dirname(filename) == "":
+            os.makedirs(os.path.dirname(filename), exist_ok=True)
+        # write flow
+        flow_img = np.rollaxis(flow_img, 0, 3)
+        data = colorplot_light(
+            flow_img, auto_scale=auto_scale, max_scale=max_scale, return_max=False)
+        data = data.astype(np.uint8)
+        data = Image.fromarray(data)
+        data.save(filename)

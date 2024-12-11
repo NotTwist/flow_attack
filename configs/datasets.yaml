@@ -1,12 +1,12 @@
 datasets:
-  sintel_mpi:
+  sintel:
     root: "/home/28s_mur@lab.graphicon.ru/flow_attack/datasets/sintel"
     split: "training"
     dstype: "clean"
     has_gt: true
     frames: 2
 
-  kitti15:
+  Kitti15:
     root: "/home/28s_mur@lab.graphicon.ru/flow_attack/datasets/kitti15"
     split: "training"
     has_gt: true

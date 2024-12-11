@@ -12,18 +12,11 @@ import os
 from spatial_correlation_sampler import spatial_correlation_sample
 import numpy as np
 
-from helper_functions.config_paths import Conf
 
 
-if Conf.config('correlationSamplerOnlyCPU') or not torch.cuda.is_available():
-	scs_device = torch.device("cpu")
-else:
-	scs_device = torch.device("cuda")
+scs_device = torch.device("cuda")
 
-if Conf.config('useCPU') or not torch.cuda.is_available():
-	device = torch.device("cpu")
-else:
-	device = torch.device("cuda")
+device = torch.device("cuda")
 
 
 __all__ = [

@@ -7,8 +7,9 @@
 5. Add model as command line argument (#TODO)
 
 ## TODOS
-<s>1. Finish model loading (add yaml file loading with arguments to import and load)</s>
-2. Add flow viz with flow_library
+1. <s>Finish model loading (add yaml file loading with arguments to import and load)</s>
+2. <s>Add flow viz with flow_library</s>
 3. Test model loading with datasets
-4. Add logging with mlflow
-5. Create baseattack class
+4. Move MemFlow weights to _pretrained_weights folder
+5. Add logging with mlflow
+6. Create baseattack class

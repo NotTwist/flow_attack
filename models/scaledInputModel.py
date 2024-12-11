@@ -2,7 +2,7 @@ import torch
 import torch.nn as nn
 import logging
 
-import model_utils
+from models import model_utils
 
 #from PCFA attack
 class ScaledInputModel(nn.Module):
