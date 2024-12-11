@@ -7,3 +7,6 @@ env/
 *.env
 *.log
 
+datasets/
+models/models/_pretrained_weights/
+models/models/MemFlow/ckpts

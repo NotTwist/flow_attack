@@ -1,0 +1,122 @@
+class InputPadder:
+    """Pads images such that dimensions are divisible by divisor
+
+    This method is taken from https://github.com/princeton-vl/RAFT/blob/master/core/utils/utils.py
+    """
+
+    def __init__(self, dims, divisor=8, mode='sintel'):
+        self.ht, self.wd = dims[-2:]
+        pad_ht = (((self.ht // divisor) + 1) * divisor - self.ht) % divisor
+        pad_wd = (((self.wd // divisor) + 1) * divisor - self.wd) % divisor
+        if mode == 'sintel':
+            self._pad = [pad_wd//2, pad_wd - pad_wd //
+                         2, pad_ht//2, pad_ht - pad_ht//2]
+        else:
+            self._pad = [pad_wd//2, pad_wd - pad_wd//2, 0, pad_ht]
+
+    def pad(self, *inputs):
+        """Pad a batch of input images such that the image size is divisible by the factor specified as divisor
+
+        Returns:
+                list: padded input images
+        """
+        return [F.pad(x, self._pad, mode='replicate') for x in inputs]
+
+    def get_dimensions(self):
+        """get the original spatial dimension of the image
+
+        Returns:
+                int: original image height and width
+        """
+        return self.ht, self.wd
+
+    def unpad(self, x):
+        """undo the padding and restore original spatial dimension
+
+        Args:
+                x (tensor): a tensor with padded dimensions
+
+        Returns:
+                tesnor: tensor with removed padding (i.e. original spatial dimension)
+        """
+        ht, wd = x.shape[-2:]
+        c = [self._pad[2], ht-self._pad[3], self._pad[0], wd-self._pad[1]]
+        return x[..., c[0]:c[1], c[2]:c[3]]
+
+
+def preprocess_img(network, *images):
+    """Manipulate input images, such that the specified network is able to handle them
+
+    Args:
+            network (str):
+                    Specify the network to which the input images are adapted
+
+    Returns:
+            InputPadder, *tensor:
+                    returns the Padder object used to adapt the image dimensions as well as the transformed images
+    """
+    if network == 'RAFT' or network == "GMA" or network == "FlowFormer" or network == "SEA-RAFT":
+        padder = InputPadder(images[0].shape)
+        output = padder.pad(*images)
+
+    elif network == 'PWCNet':
+        images = [(img / 255.) for img in images]
+        padder = InputPadder(images[0].shape, divisor=64)
+        output = padder.pad(*images)
+
+    elif network == 'SpyNet':
+        # normalize images to [0, 1]
+        images = [img / 255. for img in images]
+        # make image divisibile by 64
+        padder = InputPadder(images[0].shape, divisor=64)
+        output = padder.pad(*images)
+
+    elif network[:7] == 'FlowNet':
+        # normalization only for FlowNet, not FlowNet2
+        if not network[:8] == 'FlowNet2':
+            images = [img / 255. for img in images]
+        # make image divisibile by 64
+        padder = InputPadder(images[0].shape, divisor=64)
+        output = padder.pad(*images)
+    elif network[:7] == 'MeFlow':
+        padder = InputPadder(images[0].shape, divisor=8)
+        output = padder.pad(*images)
+    else:
+        padder = None
+        output = images
+    return padder, output
+
+
+def postprocess_flow(network, padder, *flows):
+    """Manipulate the output flow by removing the padding
+
+    Args:
+            network (str): name of the network used to create the flow
+            padder (InputPadder): instance of InputPadder class used during preprocessing
+            flows (*tensor): (batch) of flow fields
+
+    Returns:
+            *tensor: output with removed padding
+    """
+
+    if padder != None:
+        # remove padding
+        return [padder.unpad(flow).cpu() for flow in flows]
+    else:
+        return flows
+
+
+def model_takes_unit_input(model):
+    """Boolean check if a network needs input in range [0,1] or [0,255]
+
+    Args:
+            model (str):
+                    name of the model
+
+    Returns:
+            bool: True -> [0,1], False -> [0,255]
+    """
+    model_takes_unit_input = False
+    if model in ["PWCNet", "SpyNet"]:
+        model_takes_unit_input = True
+    return model_takes_unit_input

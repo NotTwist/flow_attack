@@ -1,19 +1,19 @@
 datasets:
   sintel_mpi:
-    root: "/path/to/sintel"
+    root: "/home/28s_mur@lab.graphicon.ru/flow_attack/datasets/sintel"
     split: "training"
     dstype: "clean"
     has_gt: true
     frames: 2
 
   kitti15:
-    root: "/path/to/kitti"
+    root: "/home/28s_mur@lab.graphicon.ru/flow_attack/datasets/kitti15"
     split: "training"
     has_gt: true
     frames: 2
 
   demo:
-    root: "/path/to/demo"
+    root: "/home/28s_mur@lab.graphicon.ru/flow_attack/datasets/test3"
     split: "eval"
     has_gt: false
     n_images: -1
