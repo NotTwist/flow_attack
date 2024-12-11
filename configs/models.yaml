@@ -1,0 +1,36 @@
+models:
+  GMA:
+    config:
+      epsilon: 1e-8
+      num_heads: 1
+      small: false
+      mixed_precision: true
+      alternate_correlation: false
+      position_only: false
+      position_and_content: false
+    weights_path: "models/_pretrained_weights/raft-sintel.pth"
+    other_args: {}
+
+  RAFT:
+    config:
+      epsilon: 1e-8
+      small: false
+      mixed_precision: false
+      alternate_correlation: false
+    weights_path: "models/_pretrained_weights/raft-sintel.pth"
+    other_args: {}
+
+  PWCNet:
+    weights_path: "models/_pretrained_weights/pwc_net_chairs.pth.tar"
+    other_args: {}
+
+  SpyNet:
+    weights_path: "models/_pretrained_weights/spynet_weights.pth"
+    other_args: {}
+
+  FlowNet2:
+    config:
+      fp16: false
+      rgb_max: 255.0
+    weights_path: "models/_pretrained_weights/FlowNet2_checkpoint.pth.tar"
+    other_args: {}

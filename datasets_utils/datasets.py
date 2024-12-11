@@ -7,6 +7,7 @@ from . import frame_utils
 from PIL import Image
 from glob import glob
 import os.path as osp
+from argparse import Namespace
 # from PCFA attack
 class FlowDataset(data.Dataset):
     def __init__(self, aug_params=None, sparse=False, frames=2):
