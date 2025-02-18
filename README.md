@@ -9,10 +9,15 @@
 ## TODOS
 1. <s>Finish model loading (add yaml file loading with arguments to import and load)</s>
 2. <s>Add flow viz with flow_library</s>
-3. Test model loading with datasets
+3. <s>Test model loading with datasets</s>
 4. Add MeFlow
 5. Move MemFlow weights to _pretrained_weights folder
 6. Add logging with mlflow
-7. Create baseattack class
+7. <s>Create baseattack class</s>
 8. Add flow_benchmark models
 9. Create argparse
+
+
+- Rewrite code so images are stored in a tensor instead of list of tensors
+- Rewrite flow computing because this is disgusting
+- Write tests

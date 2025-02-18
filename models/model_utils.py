@@ -241,7 +241,47 @@ def import_and_load(net='RAFT', make_unit_input=False, variable_change=False, de
                 model.load_state_dict(weights, strict=False)
                 model.to(device)
             elif net == 'MemFlow':
-                pass
+                from models.models.MemFlow.core.Networks import build_network
+                from models.models.MemFlow.configs.sintel_memflownet import get_cfg # CHANGE IF WE CHANGE CHECKPOINT!!!!
+                # TODO
+                if args.name == "MemFlowNet":
+                    if args.stage == 'things':
+                        from configs.things_memflownet import get_cfg
+                    elif args.stage == 'sintel':
+                        from configs.sintel_memflownet import get_cfg
+                    elif args.stage == 'spring_only':
+                        from configs.spring_memflownet import get_cfg
+                    elif args.stage == 'kitti':
+                        from configs.kitti_memflownet import get_cfg
+                    else:
+                        raise NotImplementedError
+                elif args.name == "MemFlowNet_T":
+                    if args.stage == 'things':
+                        from configs.things_memflownet_t import get_cfg
+                    elif args.stage == 'things_kitti':
+                        from configs.things_memflownet_t_kitti import get_cfg
+                    elif args.stage == 'sintel':
+                        from configs.sintel_memflownet_t import get_cfg
+                    elif args.stage == 'kitti':
+                        from configs.kitti_memflownet_t import get_cfg
+                    else:
+                        raise NotImplementedError
+
+                cfg = get_cfg()
+                cfg.update(config)
+                model = build_network(cfg).cuda()
+                if cfg.restore_ckpt is not None:
+                    ckpt = torch.load(cfg.restore_ckpt, map_location=device)
+                    ckpt_model = ckpt['model'] if 'model' in ckpt else ckpt
+                    if 'module' in list(ckpt_model.keys())[0]:
+                        for key in ckpt_model.keys():
+                            ckpt_model[key.replace(
+                                'module.', '', 1)] = ckpt_model.pop(key)
+                        model.load_state_dict(ckpt_model, strict=True)
+                    else:
+                        model.load_state_dict(ckpt_model, strict=True)
+                model.eval()
+                model.to(device)
             # TODO add other models
             if model is None:
                 raise RuntimeWarning(
@@ -299,6 +339,25 @@ def compute_flow(model, network, images, test_mode=True, **kwargs):
         flow = model(x)
     elif network == 'MeFlow':
         _, flow = model(images[0], images[1], test_mode=test_mode)
+    elif network == 'MemFlow':
+        from models.models.MemFlow.inference import inference_core_skflow as inference_core
+        processor = inference_core.InferenceCore(
+                    model, config=cfg)
+        # print(len(images))
+        images = torch.stack(images, dim = 1).cuda()
+        # images = 2 * (images / 255.0) - 1.0
+        flow_prev = None
+        results = []
+        # print(images.shape)
+        for ti in range(images.shape[1] - 1):
+            flow_low, flow_pre = processor.step(images[:, ti:ti + 1], end=(ti == images.shape[1] - 2),
+                                                add_pe=('rope' in cfg and cfg.rope), flow_init=flow_prev)
+            results.append(flow_pre)
+            # print(flow_pre.shape)
+            if 'warm_start' in cfg and cfg.warm_start:
+                flow_prev = forward_interpolate(flow_low[0])[None].cuda()
+        
+        return torch.stack(results)[0]
     elif network == 'PWCNet' or network == 'SpyNet':  # works for PWCNet, SpyNet
         flow = model(images[0], images[1], **kwargs)
     return flow

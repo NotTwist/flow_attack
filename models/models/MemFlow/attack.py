@@ -37,9 +37,6 @@ class MemFlow:
         processor = inference_core.InferenceCore(self.model, config=self.cfg)
         # print(len(images))
         images = torch.stack(images, dim = 1).cuda()
-        padder = InputPadder(images.shape)
-        images = padder.pad(images)
-        print(images)
         # images = 2 * (images / 255.0) - 1.0
         flow_prev = None
         results = []
@@ -47,7 +44,6 @@ class MemFlow:
         for ti in range(images.shape[1] - 1):
             flow_low, flow_pre = processor.step(images[:, ti:ti + 1], end=(ti == images.shape[1] - 2),
                                                 add_pe=('rope' in self.cfg and self.cfg.rope), flow_init=flow_prev)
-            flow_pre = padder.unpad(flow_pre[0]).cpu()
             results.append(flow_pre)
             # print(flow_pre.shape)
             if 'warm_start' in self.cfg and self.cfg.warm_start:

@@ -54,3 +54,9 @@ models:
       count_time: False,
     weights_path: "models/_pretrained_weights/sintel.pth"
     other_args: {}
+  MemFlow:
+    config:
+      stage: "sintel"
+      seq_dir: 'default'
+      vis_dir: 'default'
+    weights_path: "/home/28s_mur@lab.graphicon.ru/flow_benchmark/PCFA/models/MemFlow/ckpts/MemFlowNet_sintel.pth"

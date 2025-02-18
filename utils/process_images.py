@@ -86,7 +86,10 @@ def preprocess_img(network, *images):
         # make image divisibile by 64
         padder = InputPadder(images[0].shape, divisor=64)
         output = padder.pad(*images)
-    elif network[:7] == 'MeFlow':
+    elif network == 'MeFlow':
+        padder = InputPadder(images[0].shape, divisor=8)
+        output = padder.pad(*images)
+    elif network == 'MemFlow':
         padder = InputPadder(images[0].shape, divisor=8)
         output = padder.pad(*images)
     else:
