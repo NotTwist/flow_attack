@@ -6,14 +6,16 @@ from models.model_utils import compute_flow
 from typing import Literal
 from cospgd import functions
 
-
-class FGSMOpticalFlowAttack(OpticalFlowAttack):
+class PGDOpticalFlowAttack(OpticalFlowAttack):
     """
-    Implements the Fast Gradient Sign Method (FGSM) attack.
-    This is a non-learned attack.
+    Implements the Projected Gradient Descent (PGD) attack.
+    This is a non-learned attack that starts from a random point within
+    the epsilon-ball around the original image and projects back onto that
+    ball after each update.
     """
 
-    def __init__(self, model, target: Literal['zero', 'neg_flow', 'untargeted'], epsilon=0.03, device=None, num_steps=20, common_perturb=False, clipping=True, image_min=0, image_max=1, save_iterations: list = []):
+    def __init__(self, model, target: Literal['zero', 'neg_flow', 'untargeted'], epsilon=0.03, device=None, num_steps=20,
+                 common_perturb=False, clipping=True, image_min=0, image_max=1, save_iterations: list = []):
         super().__init__(model, epsilon, device, target=target, learned=False)
         self.num_steps = num_steps
         self.common_perturb = common_perturb
@@ -24,7 +26,7 @@ class FGSMOpticalFlowAttack(OpticalFlowAttack):
 
     def attack(self, images: torch.Tensor):
         """
-        Generates adversarial images using FGSM.
+        Generates adversarial images using PGD.
 
         Args:
             images (torch.Tensor): Original images [B, C, H, W].
@@ -32,12 +34,25 @@ class FGSMOpticalFlowAttack(OpticalFlowAttack):
         Returns:
             torch.Tensor: Adversarial images.
         """
-        images = images.clone().detach().to(self.device)
-        orig_images = images.clone().detach()  # Store the original images
-        images.requires_grad = True
-        flow_pred = compute_flow(
-            self.model, "scaled_input_model", images)
+        orig_images = images.clone().detach().to(self.device)
 
+        images = functions.init_linf(
+            orig_images, epsilon=self.epsilon, clamp_min=self.image_min, clamp_max=self.image_max
+        )
+        # # --- Random Initialization ---
+        # # Add uniform noise in [-epsilon, epsilon] and clip to valid image range
+        # random_noise = torch.empty_like(
+        #     orig_images).uniform_(-self.epsilon, self.epsilon)
+        # images = orig_images + random_noise
+        # images = torch.clamp(images, self.image_min, self.image_max)
+        # # Ensure the perturbation is within the epsilon-ball
+        # images = torch.min(torch.max(images, orig_images -
+        #                    self.epsilon), orig_images + self.epsilon)
+
+        images.requires_grad = True
+
+        # Compute initial flow prediction and target
+        flow_pred = compute_flow(self.model, "scaled_input_model", images)
         flow_pred = flow_pred.to(self.device)
         target = self.target(flow_pred)
         target = target.to(self.device)
@@ -51,12 +66,13 @@ class FGSMOpticalFlowAttack(OpticalFlowAttack):
             self.model.zero_grad()
             loss.backward()
             grads = images.grad.data
-            # Pass original images
+
             images = self.step(images, grads, orig_images)
             images = images.detach()
             images.requires_grad = True
-            flow_pred = compute_flow(
-                self.model, "scaled_input_model", images)
+
+            # Recompute the flow prediction for the updated images
+            flow_pred = compute_flow(self.model, "scaled_input_model", images)
             flow_pred = flow_pred.to(self.device)
 
             # Store flow at specific attack steps

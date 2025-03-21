@@ -8,7 +8,7 @@ models:
       alternate_correlation: false
       position_only: false
       position_and_content: false
-    weights_path: "models/_pretrained_weights/raft-sintel.pth"
+    weights_path: "models/_pretrained_weights/gma-sintel.pth"
     other_args: {}
 
   RAFT:

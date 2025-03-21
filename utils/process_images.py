@@ -5,7 +5,7 @@ import sys
 sys.path.append("flow_library")
 from flow_library.flow_plot import colorplot_light
 import numpy as np
-
+import torch
 class InputPadder:
     """Pads images such that dimensions are divisible by divisor
 
@@ -28,7 +28,7 @@ class InputPadder:
         Returns:
                 list: padded input images
         """
-        return [F.pad(x, self._pad, mode='replicate') for x in inputs]
+        return torch.stack([F.pad(x, self._pad, mode='replicate') for x in inputs])
 
     def get_dimensions(self):
         """get the original spatial dimension of the image
@@ -52,7 +52,7 @@ class InputPadder:
         return x[..., c[0]:c[1], c[2]:c[3]]
 
 
-def preprocess_img(network, *images):
+def preprocess_img(network, images):
     """Manipulate input images, such that the specified network is able to handle them
 
     Args:
@@ -68,13 +68,13 @@ def preprocess_img(network, *images):
         output = padder.pad(*images)
 
     elif network == 'PWCNet':
-        images = [(img / 255.) for img in images]
+        images = [img for img in images]
         padder = InputPadder(images[0].shape, divisor=64)
         output = padder.pad(*images)
 
     elif network == 'SpyNet':
         # normalize images to [0, 1]
-        images = [img / 255. for img in images]
+        images = [img for img in images]
         # make image divisibile by 64
         padder = InputPadder(images[0].shape, divisor=64)
         output = padder.pad(*images)

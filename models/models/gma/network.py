@@ -2,11 +2,11 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from models.gma.update import GMAUpdateBlock
-from models.gma.extractor import BasicEncoder
-from models.gma.corr import CorrBlock
-from models.gma.utils.utils import bilinear_sampler, coords_grid, upflow8
-from models.gma.gma import Attention, Aggregate
+from .update import GMAUpdateBlock
+from .extractor import BasicEncoder
+from .corr import CorrBlock
+from .utils.utils import bilinear_sampler, coords_grid, upflow8
+from .gma import Attention, Aggregate
 
 try:
     autocast = torch.cuda.amp.autocast

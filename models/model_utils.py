@@ -201,7 +201,7 @@ def import_and_load(net='RAFT', make_unit_input=False, variable_change=False, de
                 from models.models.raft.raft import RAFT
                 model = torch.nn.DataParallel(RAFT(config))
                 model.load_state_dict(torch.load(
-                    weights_path, map_location=device))
+                    weights_path, map_location=device, weights_only=True))
 
             elif net == 'GMA':
                 from models.models.gma.network import RAFTGMA
@@ -361,3 +361,19 @@ def compute_flow(model, network, images, test_mode=True, **kwargs):
     elif network == 'PWCNet' or network == 'SpyNet':  # works for PWCNet, SpyNet
         flow = model(images[0], images[1], **kwargs)
     return flow
+
+
+def model_takes_unit_input(model):
+    """Boolean check if a network needs input in range [0,1] or [0,255]
+
+    Args:
+            model (str):
+                    name of the model
+
+    Returns:
+            bool: True -> [0,1], False -> [0,255]
+    """
+    model_takes_unit_input = False
+    if model in ["PWCNet", "SpyNet"]:
+        model_takes_unit_input = True
+    return model_takes_unit_input

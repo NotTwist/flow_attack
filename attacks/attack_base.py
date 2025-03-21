@@ -10,7 +10,7 @@ class OpticalFlowAttack(abc.ABC):
     This class provides a common interface for both non-learned (e.g. FGSM) and learned attacks.
     """
 
-    def __init__(self, model, epsilon=0.03, device=None, learned=False, target='zero', loss='aee'):
+    def __init__(self, model, epsilon=0.03, device=None, learned=False, target='neg_flow', loss='aee'):
         """
         Args:
             model (torch.nn.Module): Optical flow model to attack.

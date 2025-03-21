@@ -7,17 +7,10 @@
 5. Add model as command line argument (#TODO)
 
 ## TODOS
-1. <s>Finish model loading (add yaml file loading with arguments to import and load)</s>
-2. <s>Add flow viz with flow_library</s>
-3. <s>Test model loading with datasets</s>
-4. Add MeFlow
-5. Move MemFlow weights to _pretrained_weights folder
-6. Add logging with mlflow
-7. <s>Create baseattack class</s>
-8. Add flow_benchmark models
-9. Create argparse
+1. <s>Add saving iterations to FGSM, PGD</s>
+2. Run CosPGD, FGSM, PGD on full Kitti while saving iterations
+3. Create .ipynb for graph creation
+4. Add MI-FGSM, APGD
+5. Add ptlflow
 
 
-- Rewrite code so images are stored in a tensor instead of list of tensors
-- Rewrite flow computing because this is disgusting
-- Write tests

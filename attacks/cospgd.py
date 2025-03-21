@@ -3,58 +3,67 @@ import torch.nn.functional as F
 from .attack_base import OpticalFlowAttack
 import numpy as np
 from models.model_utils import compute_flow
-from typing import Literal
 from cospgd import functions
+from typing import Literal
 
-
-class FGSMOpticalFlowAttack(OpticalFlowAttack):
+class CosPGDOpticalFlowAttack(OpticalFlowAttack):
     """
     Implements the Fast Gradient Sign Method (FGSM) attack.
     This is a non-learned attack.
     """
 
-    def __init__(self, model, target: Literal['zero', 'neg_flow', 'untargeted'], epsilon=0.03, device=None, num_steps=20, common_perturb=False, clipping=True, image_min=0, image_max=1, save_iterations: list = []):
-        super().__init__(model, epsilon, device, target=target, learned=False)
+    def __init__(self, model, target: Literal['zero', 'neg_flow', 'untargeted'], epsilon = 0.03, device=None, num_steps=20, common_perturb=False, clipping=True, image_min=0, image_max=1, no_softmax=False, save_iterations: list = []):
+        super().__init__(model, epsilon, device,target=target, learned=False)
         self.num_steps = num_steps
         self.common_perturb = common_perturb
         self.clipping = clipping
         self.image_max = image_max
         self.image_min = image_min
+        self.no_softmax = no_softmax
         self.save_iterations = save_iterations
+        print(f"no_softmax set to {self.no_softmax}")
+        
 
     def attack(self, images: torch.Tensor):
         """
-        Generates adversarial images using FGSM.
+        Generates adversarial images using CosPGD attack and returns flow results for specific iterations.
 
         Args:
             images (torch.Tensor): Original images [B, C, H, W].
 
         Returns:
-            torch.Tensor: Adversarial images.
+            dict: Contains final adversarial images and optical flow results at selected iterations.
         """
         images = images.clone().detach().to(self.device)
         orig_images = images.clone().detach()  # Store the original images
         images.requires_grad = True
         flow_pred = compute_flow(
-            self.model, "scaled_input_model", images)
+            self.model, "scaled_input_model", images).to(self.device)
 
-        flow_pred = flow_pred.to(self.device)
-        target = self.target(flow_pred)
-        target = target.to(self.device)
+        target = self.target(flow_pred).to(self.device)
         target.requires_grad = False
 
         # Dictionary to store flow outputs at specific iterations
         tracked_flows = {}
 
-        for step in range(self.num_steps):
+        for step in range(1, self.num_steps + 1):
             loss = self.loss(flow_pred, target)
-            self.model.zero_grad()
+            if self.no_softmax:
+                loss = functions.cospgd_scale_no_softmax(
+                    predictions=flow_pred, labels=target.float(), loss=loss, targeted=True, one_hot=False
+                )
+            else:
+                loss = functions.cospgd_scale(
+                    predictions=flow_pred, labels=target.float(), loss=loss, targeted=True, one_hot=False
+                )
+            loss = loss.mean()
             loss.backward()
             grads = images.grad.data
-            # Pass original images
             images = self.step(images, grads, orig_images)
             images = images.detach()
             images.requires_grad = True
+
+
             flow_pred = compute_flow(
                 self.model, "scaled_input_model", images)
             flow_pred = flow_pred.to(self.device)

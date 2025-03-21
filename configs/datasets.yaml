@@ -1,5 +1,5 @@
 datasets:
-  sintel:
+  Sintel:
     root: "/home/28s_mur@lab.graphicon.ru/flow_attack/datasets/sintel"
     split: "training"
     dstype: "clean"

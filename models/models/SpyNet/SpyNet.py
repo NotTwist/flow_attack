@@ -9,9 +9,9 @@ import PIL.Image
 import sys
 import torch
 from torch.nn import init
-from helper_functions.config_paths import Conf
+# from helper_functions.config_paths import Conf
 
-if Conf.config('useCPU') or not torch.cuda.is_available():
+if not torch.cuda.is_available():
 	device = torch.device("cpu")
 else:
 	device = torch.device("cuda")
@@ -75,7 +75,7 @@ class Basic(torch.nn.Module):
 				intLevel = 4 # the models trained on the flying chairs dataset do not come with weights for the sixth layer
 
 		import pathlib
-		weights_path = f'{pathlib.Path(__file__).parent.parent.resolve()}/_pretrained_weights/spynet_weights/modelL'
+		weights_path = f'{pathlib.Path(__file__).parent.parent.parent.resolve()}/_pretrained_weights/spynet_weights/modelL'
 		for intConv in range(5):
 			self.moduleBasic[intConv * 2].weight.data.copy_(torch.load(weights_path + str(intLevel + 1) + '_' + arguments_strModel  + '-' + str(intConv + 1) + '-weight.pth.tar'))
 			self.moduleBasic[intConv * 2].bias.data.copy_(torch.load(weights_path + str(intLevel + 1) + '_' + arguments_strModel  + '-' + str(intConv + 1) + '-bias.pth.tar'))

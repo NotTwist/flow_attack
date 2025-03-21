@@ -7,6 +7,7 @@ from . import frame_utils
 from PIL import Image
 from glob import glob
 import os.path as osp
+import os
 from argparse import Namespace
 # from PCFA attack
 class FlowDataset(data.Dataset):
@@ -89,7 +90,7 @@ class FlowDataset(data.Dataset):
             if self.has_gt:
                 valid = F.pad(valid, (0, diff_y, 0, diff_x), "constant", False)
 
-        return imgs, flow, valid
+        return torch.stack(imgs, dim=0), flow, valid
 
     def __rmul__(self, v):
         self.flow_list = v * self.flow_list

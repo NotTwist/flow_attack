@@ -66,19 +66,16 @@ class ScaledInputModel(nn.Module):
         #     image2 = image2 + batch_delta2
 
         # Perform the Carlini&Wagner Change of Variables, if the ScaledInputModel was configured to do so.
-        for image in images:
-            if self.var_change:
-                image = (1. / 2.) * 1. / (1. - self.eps_box) * \
-                        (torch.tanh(image) + (1 - self.eps_box))
+        if self.var_change:
+            images = 0.5 * 1.0 / (1.0 - self.eps_box) * \
+                (torch.tanh(images) + (1 - self.eps_box))
 
-            # Clipping case: only clip if `var_change` was not defined; otherwise,
-            # the change of variables has already brought the images into the range [0,1].
-            image = torch.clamp(image, 0., 1.)
+        # Clip images to [0,1].
+        images = torch.clamp(images, 0.0, 1.0)
 
-            # If model expects images in [0,255], transform them from [0,1].
-            if self.make_unit_input:
-                image = 255. * image
-
+        # If model expects images in [0,255], scale them.
+        if self.make_unit_input:
+            images = 255.0 * images
             
 
         # return self.model_loaded(image1, image2, *args, **kwargs)

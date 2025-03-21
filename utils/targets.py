@@ -26,7 +26,7 @@ def neg_flow(flow):
 	Returns:
 		tensor: reversed flow field
 	"""
-	return - flow
+	return - flow.detach()
 
 def get_target(target_name, custom_target_path="", device=None):
 	"""Getter method which yields a specified target flow used during PCFA 
