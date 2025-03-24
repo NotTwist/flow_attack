@@ -6,7 +6,8 @@ import cv2
 from typing import Literal
 from utils.process_images import quickvis_flow
 from datetime import datetime
-
+from ptlflow.utils import flow_utils
+import cv2 as cv
 
 class AttackMetricsTracker:
     def __init__(self, output_dir="experiment_data", experiment_name="attack_experiment", run_name=None, args=None):
@@ -206,10 +207,12 @@ class AttackMetricsTracker:
 
     def save_image(self, image, filename):
         if torch.is_tensor(image):
-            image = image.detach().cpu().numpy().squeeze(0)
+            image = image.detach().cpu().numpy()
+            if image.ndim == 4:
+                image = image.squeeze(0)
             if image.ndim == 3:
                 image = np.transpose(image, (1, 2, 0))
-        image = np.array(image)
+
 
         # convert to bgr
         image = cv2.cvtColor(image, cv2.COLOR_RGB2BGR)
@@ -263,3 +266,12 @@ class AttackMetricsTracker:
             f"AEE (init vs attack): {mean_metrics.get('aee_init_attack', 'N/A'):.4f}")
         print(
             f"AEE (attacked vs target): {mean_metrics.get('aee_target_attack', 'N/A'):.4f}")
+
+
+    def save_flow(self, flow):
+        flow = flow.permute(1, 2, 0)  # change from CHW to HWC shape
+        flow = flow.detach().cpu().numpy()
+        flow_viz = flow_utils.flow_to_rgb(flow)  # Represent the flow as RGB colors
+        flow_viz = cv.cvtColor(flow_viz, cv.COLOR_BGR2RGB)
+        cv.imwrite('test.png', flow_viz)
+        # mlflow.log_artifact(artifact_path)

@@ -2,6 +2,8 @@ from .fgsm import FGSMOpticalFlowAttack
 from .pgd import PGDOpticalFlowAttack
 from .cospgd import CosPGDOpticalFlowAttack
 from .gradcam import GradCAMOpticalFlowAttack
+from .apgd import APGDOpticalFlowAttack
+from .mifgsm import MIFGSMOpticalFlowAttack
 from typing import Literal
 
 
@@ -29,5 +31,9 @@ def get_attack(attack_name, model, target: Literal['zero', 'neg_flow', 'untarget
         return CosPGDOpticalFlowAttack(model=model, epsilon=epsilon, alpha=alpha, num_steps=num_steps, no_softmax=no_softmax, target=target, save_iterations=save_iterations)
     elif attack_name == 'GradCAM':
         return GradCAMOpticalFlowAttack(model=model, epsilon=epsilon, alpha=alpha, num_steps=num_steps, target=target)
+    elif attack_name == 'APGD':
+        return APGDOpticalFlowAttack(model=model, epsilon=epsilon, num_steps=num_steps, target=target)
+    elif attack_name == 'MIFGSM':
+        return MIFGSMOpticalFlowAttack(model=model, epsilon=epsilon, num_steps=num_steps, target=target)
     else:
         raise ValueError(f"Unknown attack name: {attack_name}")

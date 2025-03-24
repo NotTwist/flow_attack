@@ -6,6 +6,9 @@ sys.path.append("flow_library")
 from flow_library.flow_plot import colorplot_light
 import numpy as np
 import torch
+import copy
+from typing import Dict
+
 class InputPadder:
     """Pads images such that dimensions are divisible by divisor
 
@@ -170,3 +173,50 @@ def quickvis_flow(flow, filename, auto_scale=True, max_scale=-1):
         data = data.astype(np.uint8)
         data = Image.fromarray(data)
         data.save(filename)
+
+
+# from flowbench
+
+def get_image_tensors(input_dic: Dict[str, torch.Tensor], clone=False):
+    if clone:
+        images = input_dic["images"][0].clone()
+    else:
+        images = input_dic["images"][0]
+
+    return torch.stack([images[0], images[1]], dim=0)  # Shape: (2, C, H, W)
+
+
+def get_flow_tensors(input_dic: Dict[str, torch.Tensor]):
+    return input_dic["flows"][0][0].unsqueeze(0)  # Shape: (1, C, H, W)
+
+
+def get_image_grads(input_dic: Dict[str, torch.Tensor]):
+    grad = input_dic["images"].grad
+    return torch.stack([grad[0][0], grad[0][1]], dim=0)  # Shape: (2, C, H, W)
+
+
+def replace_images_dic(
+    input_dic: Dict[str, torch.Tensor],
+    images: torch.Tensor,
+    clone: bool = False,
+):
+    """
+    Replaces the "images" key in input_dic with a new tensor containing both images.
+
+    Args:
+        input_dic (Dict[str, torch.Tensor]): The input dictionary.
+        images (torch.Tensor): A tensor of shape (2, C, H, W) containing two images.
+        clone (bool): If True, creates a cloned copy of input_dic before modifying.
+
+    Returns:
+        Dict[str, torch.Tensor]: Updated dictionary with replaced images.
+    """
+    if images.shape[0] != 2:
+        raise ValueError("Expected images tensor of shape (2, C, H, W)")
+
+    output_dic = {k: v.clone()
+                  for k, v in input_dic.items()} if clone else input_dic
+    # Ensures correct shape: (1, 2, C, H, W)
+    output_dic["images"] = images.unsqueeze(0)
+
+    return output_dic

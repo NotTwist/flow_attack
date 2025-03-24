@@ -1,0 +1,16 @@
+03/24/2025 18:10:26 - WARNING: --train_dataset is not set. It will be set as chairs-train
+03/24/2025 18:10:26 - WARNING: --train_batch_size is not set. It will be set to 8
+03/24/2025 18:10:26 - WARNING: --train_crop_size is not set. It will be set as (368, 496).
+03/24/2025 18:11:25 - WARNING: --val_dataset is not set. It will be set as sintel-clean+sintel-final+kitti-2015. If you want to skip validation, then set --val_dataset none.
+03/24/2025 22:46:48 - INFO: Creating a Model with scaled input and the following parameters:
+03/24/2025 22:46:48 - INFO: 	make_unit_input=True
+03/24/2025 22:49:12 - INFO: Creating a Model with scaled input and the following parameters:
+03/24/2025 22:49:12 - INFO: 	make_unit_input=True
+03/24/2025 22:55:00 - INFO: Creating a Model with scaled input and the following parameters:
+03/24/2025 22:55:00 - INFO: 	make_unit_input=True
+03/24/2025 22:57:49 - INFO: Creating a Model with scaled input and the following parameters:
+03/24/2025 22:57:49 - INFO: 	make_unit_input=True
+03/24/2025 22:59:20 - INFO: Creating a Model with scaled input and the following parameters:
+03/24/2025 22:59:20 - INFO: 	make_unit_input=True
+03/24/2025 23:26:23 - INFO: Creating a Model with scaled input and the following parameters:
+03/24/2025 23:26:23 - INFO: 	make_unit_input=False

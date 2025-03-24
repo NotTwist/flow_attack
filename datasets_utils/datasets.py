@@ -73,7 +73,7 @@ class FlowDataset(data.Dataset):
             flow = torch.from_numpy(flow).permute(2, 0, 1).float()
 
         for i in range(self.frames):
-            imgs[i] = torch.from_numpy(imgs[i]).permute(2, 0, 1).float()
+            imgs[i] = torch.from_numpy(imgs[i]).permute(2, 0, 1)
 
         if self.enforce_dimensions:
             dims = imgs[0].size()
@@ -90,7 +90,7 @@ class FlowDataset(data.Dataset):
             if self.has_gt:
                 valid = F.pad(valid, (0, diff_y, 0, diff_x), "constant", False)
 
-        return torch.stack(imgs, dim=0), flow, valid
+        return torch.stack(imgs, dim=0) / 255., flow, valid
 
     def __rmul__(self, v):
         self.flow_list = v * self.flow_list

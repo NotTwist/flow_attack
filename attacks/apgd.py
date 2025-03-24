@@ -1,23 +1,31 @@
 import torch
-import torch.nn.functional as F
 from .attack_base import OpticalFlowAttack
-import numpy as np
 from models.model_utils import compute_flow
+from .adversarial_attacks_pytorch.torchattacks import APGD
+from typing import Literal
 
-class FGSMOpticalFlowAttack(OpticalFlowAttack):
-    """
-    Implements the Fast Gradient Sign Method (FGSM) attack.
-    This is a non-learned attack.
-    """
 
-    def __init__(self, model, epsilon=0.03, device=None, num_steps=20, common_perturb=False, clipping=True, image_min=0, image_max=1):
-        super().__init__(model, epsilon, device, learned=False)
+class FlowModelWrapper(torch.nn.Module):
+    def __init__(self, model, mode="scaled_input_model"):
+        super().__init__()
+        self.model = model
+        self.mode = mode
+
+    def forward(self, x):
+        """Use compute_flow instead of the model's default forward method."""
+        return compute_flow(self.model, self.mode, x)
+
+
+
+class APGDOpticalFlowAttack(OpticalFlowAttack):
+    def __init__(self, model, target: Literal['zero', 'neg_flow', 'untargeted'], epsilon=0.03, device=None, num_steps=20, common_perturb=False, clipping=True, image_min=0, image_max=1):
+        super().__init__(model, epsilon, device, learned=False, target=target)
         self.num_steps = num_steps
         self.common_perturb = common_perturb
         self.clipping = clipping
         self.image_max = image_max
         self.image_min = image_min
-        
+
     def attack(self, images: torch.Tensor):
         """
         Generates adversarial images using FGSM.
@@ -29,42 +37,21 @@ class FGSMOpticalFlowAttack(OpticalFlowAttack):
         Returns:
             torch.Tensor: Adversarial images.
         """
+        wrapped_model = FlowModelWrapper(self.model)
         images = images.clone().detach().to(self.device)
         images.requires_grad = True
-        flow_pred = compute_flow(
-            self.model, "scaled_input_model", images)
+        # print(images.shape)
+        flow_pred = wrapped_model(images)
 
         flow_pred = flow_pred.to(self.device)
         target = self.target(flow_pred)
         target = target.to(self.device)
         target.requires_grad = False
-        for step in range(self.num_steps):
-            loss = self.loss(flow_pred, target)
-            self.model.zero_grad()
-            loss.backward()
-            grads = images.grad.data
-            images = self.step(images, grads)
-            images = images.detach()
-            images.requires_grad = True
-            flow_pred = compute_flow(
-                self.model, "scaled_input_model", images)
-            flow_pred = flow_pred.to(self.device)
-            
+        
+        attack = APGD(wrapped_model, loss=self.loss, norm="Linf", eps=self.epsilon,
+                      verbose=False, steps=self.num_steps, n_restarts=1, seed=0, rho=0.75, eot_iter=1)
+        # for targeted attacks
+        attack.targeted = True
+        attack.set_mode_targeted_by_label()
+        images = attack(images, target)
         return images
-    
-
-    def step(self, images, grads):
-        alpha = self.epsilon / self.num_steps
-        if not self.common_perturb:
-            signs = grads.sign()  # Element-wise sign of gradients
-        else:
-            # Averaged sign across batch
-            signs = grads.mean(dim=0, keepdim=True).sign()
-
-        perturbed_images = images - alpha * signs  # Apply perturbation
-
-        if self.clipping:
-            perturbed_images = torch.clamp(
-                perturbed_images, self.image_min, self.image_max)
-
-        return perturbed_images

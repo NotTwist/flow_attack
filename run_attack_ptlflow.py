@@ -1,77 +1,88 @@
+import ptlflow.models
+import ptlflow.utils
+import ptlflow.utils.io_adapter
 import torch
+import numpy as np
 from tqdm import tqdm
 from datasets_utils.dataset_utils import prepare_dataloader
 from models.model_utils import import_and_load, compute_flow, model_takes_unit_input
-from utils.process_images import preprocess_img, postprocess_flow
+from utils.process_images import preprocess_img, postprocess_flow, get_image_tensors
 from metrics.attack_metrics import AttackMetricsTracker
 from utils.seed import set_seed
 from utils.args import parse_args
 from attacks.get_attacks import get_attack
+import ptlflow
+import cv2 as cv
+
+
+def load_model(model_name, dataset):
+    model_ref = ptlflow.get_model_reference(model_name)
+    checkpoints = model_ref.pretrained_checkpoints.keys()
+    for c in checkpoints:
+        if c in dataset:
+            model = ptlflow.get_model(model_name, c)
+            return model
+    print(f"No pre-trained model available for {model}/{dataset}.")
+    return None
 
 
 def main():
     # Parse arguments using the separate args.py file
-    parsed_args = parse_args()
+    args = parse_args()
 
     # Initialize metrics tracker
     metrics_tracker = AttackMetricsTracker(
-        output_dir=parsed_args.output_dir, args=parsed_args)
+        output_dir=args.output_dir, args=args)
     set_seed(42)
 
     # Prepare data loader
     data_loader, has_gt = prepare_dataloader(
-        dataset_name=parsed_args.dataset, small_run=parsed_args.small_run)
+        dataset_name=args.dataset, small_run=args.small_run)
 
     # Set device (CPU or GPU)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Setting Device to {device}\n")
 
     # Import and load the model
-    model = import_and_load(parsed_args.net, make_unit_input=not model_takes_unit_input(parsed_args.net),
-                            make_scaled_input_model=True, device=device)
+    # Get available checkpoints for a specific model (e.g., RAFT)
+    model = load_model(args.net, args.dataset.lower()).to(device)
     model.eval()
     for param in model.parameters():
         param.requires_grad = False
 
     # Set the attack based on argument
-    attack = get_attack(parsed_args.attack, model, num_steps=parsed_args.steps, no_softmax=parsed_args.no_softmax,
-                        target=parsed_args.target, epsilon=parsed_args.epsilon, save_iterations=parsed_args.save_iterations)
+    attack = get_attack(args.attack, model, num_steps=args.steps, no_softmax=args.no_softmax,
+                        target=args.target, epsilon=args.epsilon, save_iterations=args.save_iterations)
 
     # Loop over data batches
     for batch, (images, flow, valid) in enumerate(tqdm(data_loader)):
-        images = images.permute(1, 0, 2, 3, 4)
-        images = images / 255.0
-        padder, images = preprocess_img(parsed_args.net, images)
-        images = images.detach().to(device)
-        images.requires_grad = True
-
+        io_adapter = ptlflow.utils.io_adapter.IOAdapter(
+            model, input_size=images.shape[-2:], cuda=torch.cuda.is_available())
+        wrapped_inputs = {'images': images, 'flows': flow, 'valids': valid}
+        inputs = io_adapter.prepare_inputs(inputs=wrapped_inputs)
         # Compute original flow
+        import time
+        with torch.no_grad():
+            original_flow = model(inputs)['flows'].squeeze(0)
+        torch.cuda.empty_cache()
 
-        original_flow = compute_flow(model, "scaled_input_model", images)
-        [original_flow] = postprocess_flow(
-            parsed_args.net, padder, original_flow)
         # Perform the attack
-
-        attack_result = attack.attack(images)
+        attack_result = attack.attack(inputs)
 
         tracked_flows = attack_result["tracked_flows"]
         attacked_images = attack_result["final_images"]
-        flow_pred = compute_flow(model, "scaled_input_model", attacked_images)
-        [flow_pred] = postprocess_flow(parsed_args.net, padder, flow_pred)
+        with torch.no_grad():
+            flow_pred = model(attacked_images)['flows'].squeeze(0)
 
-        for step in tracked_flows:
-            tracked_flows[step] = postprocess_flow(parsed_args.net, padder, tracked_flows[step])[0]
-        
         inverse_flow = None
         # Update metrics
         metrics_tracker.update(original_flow, flow_pred,
                                gt_flow=flow, target_flow=attack.target(original_flow), inverse_flow=inverse_flow, valid=valid, tracked_flows=tracked_flows)
 
         # Save artifacts if required
-        if parsed_args.save_artifacts:
-            print(original_flow.max(), original_flow.mean())
+        if args.save_artifacts:
             metrics_tracker.save_artifact(
-                attacked_images[0], f"batch_{batch:04d}_attacked_image", artifact_type="image")
+                get_image_tensors(inputs)[0], f"batch_{batch:04d}_attacked_image", artifact_type="image")
             metrics_tracker.save_artifact(
                 flow_pred, f"batch_{batch:04d}_attacked_flow", artifact_type="flow")
             metrics_tracker.save_artifact(

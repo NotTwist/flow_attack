@@ -3,9 +3,10 @@ import torch.nn.functional as F
 from .attack_base import OpticalFlowAttack
 import numpy as np
 from models.model_utils import compute_flow
-from typing import Literal
+from typing import Literal, Dict
 from cospgd import functions
-
+from utils.process_images import get_image_tensors, get_image_grads, get_flow_tensors, replace_images_dic
+import torch.autograd.profiler as profiler
 
 class FGSMOpticalFlowAttack(OpticalFlowAttack):
     """
@@ -22,7 +23,7 @@ class FGSMOpticalFlowAttack(OpticalFlowAttack):
         self.image_min = image_min
         self.save_iterations = save_iterations
 
-    def attack(self, images: torch.Tensor):
+    def attack(self, inputs: Dict[str, torch.Tensor]):
         """
         Generates adversarial images using FGSM.
 
@@ -32,13 +33,12 @@ class FGSMOpticalFlowAttack(OpticalFlowAttack):
         Returns:
             torch.Tensor: Adversarial images.
         """
-        images = images.clone().detach().to(self.device)
-        orig_images = images.clone().detach()  # Store the original images
-        images.requires_grad = True
-        flow_pred = compute_flow(
-            self.model, "scaled_input_model", images)
 
-        flow_pred = flow_pred.to(self.device)
+        orig_images = get_image_tensors(inputs, clone=True)
+        inputs['images'].requires_grad_(True)
+        
+        flow_pred = self.model(inputs)['flows'].squeeze(0)
+
         target = self.target(flow_pred)
         target = target.to(self.device)
         target.requires_grad = False
@@ -50,21 +50,20 @@ class FGSMOpticalFlowAttack(OpticalFlowAttack):
             loss = self.loss(flow_pred, target)
             self.model.zero_grad()
             loss.backward()
-            grads = images.grad.data
+            grads = get_image_grads(inputs)
+            images = get_image_tensors(inputs)
             # Pass original images
             images = self.step(images, grads, orig_images)
-            images = images.detach()
-            images.requires_grad = True
-            flow_pred = compute_flow(
-                self.model, "scaled_input_model", images)
-            flow_pred = flow_pred.to(self.device)
+            inputs = replace_images_dic(inputs, images)
+            inputs['images'].requires_grad_(True)
+            flow_pred = self.model(inputs)['flows'].squeeze(0)
 
             # Store flow at specific attack steps
             if step in self.save_iterations:
                 tracked_flows[step] = flow_pred.clone().detach()
 
         return {
-            "final_images": images,
+            "final_images": inputs,
             "tracked_flows": tracked_flows,
         }
 

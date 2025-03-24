@@ -1,7 +1,7 @@
 import argparse
+from ptlflow.utils.utils import get_list_of_available_models_list
 
-
-epsilon = 8
+epsilon = 8/255.
 iterations = 20
 alpha = 0.01
 
@@ -13,11 +13,11 @@ def parse_args():
         description="Adversarial Attack on Optical Flow Models")
 
     # Model selection argument
-    parser.add_argument('--net', type=str, default='RAFT', choices=['RAFT', 'GMA', 'PWCNet', 'SpyNet'],
+    parser.add_argument('--net', type=str, default='RAFT', choices=get_list_of_available_models_list(),
                         help="Neural network model to use for optical flow estimation.")
 
     # Attack selection argument
-    parser.add_argument('--attack', type=str, default='FGSM', choices=['FGSM', 'PGD', 'CosPGD', 'GradCAM'],
+    parser.add_argument('--attack', type=str, default='FGSM', choices=['FGSM', 'PGD', 'CosPGD', 'GradCAM', 'APGD', 'MIFGSM'],
                         help="Adversarial attack method to use.")
     
     parser.add_argument('--target', type=str, default='zero', choices=['zero', 'neg_flow', 'untargeted'], help="Choose a target for an attack")

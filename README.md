@@ -9,9 +9,13 @@
 ## TODOS
 1. <s>Add saving iterations to FGSM, PGD</s>
 2. <s>Run CosPGD, FGSM, PGD on full Kitti while saving iterations</s>
-3. Create .ipynb for graph creation
+3. <s>Create .ipynb for graph creation</s>
 4. Rewrite get_attacks and use configs for attacks
-5. Add MI-FGSM, APGD
-6. Add ptlflow
+5. <s>Add MI-FGSM</s>, APGD
+6. <s>Add ptlflow</s>
 
-
+## TODO for ptlflow
+1. <s>Add ptlflow to argparse</s>
+2. <s>Add ptlflow functionality to other attacks</s>
+3. *Decide checkpoints for each model* - Choosing for now checkpoint equal to dataset on which attack is run
+4. Check why is the performance through ptlflow different to regular attack
