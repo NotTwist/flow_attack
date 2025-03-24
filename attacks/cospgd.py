@@ -12,8 +12,8 @@ class CosPGDOpticalFlowAttack(OpticalFlowAttack):
     This is a non-learned attack.
     """
 
-    def __init__(self, model, target: Literal['zero', 'neg_flow', 'untargeted'], epsilon = 0.03, device=None, num_steps=20, common_perturb=False, clipping=True, image_min=0, image_max=1, no_softmax=False, save_iterations: list = []):
-        super().__init__(model, epsilon, device,target=target, learned=False)
+    def __init__(self, model, target: Literal['zero', 'neg_flow', 'untargeted'], epsilon = 0.03, alpha = 0.01, device=None, num_steps=20, common_perturb=False, clipping=True, image_min=0, image_max=1, no_softmax=False, save_iterations: list = []):
+        super().__init__(model, epsilon, alpha, device,target=target, learned=False)
         self.num_steps = num_steps
         self.common_perturb = common_perturb
         self.clipping = clipping
@@ -78,14 +78,14 @@ class CosPGDOpticalFlowAttack(OpticalFlowAttack):
         }
 
     def step(self, images, grads, orig_images):
-        alpha = self.epsilon / self.num_steps
+        #alpha = self.epsilon / self.num_steps
 
         perturbed_images = functions.step_inf(
             perturbed_image=images,
             epsilon=self.epsilon,
             data_grad=grads,
             orig_image=orig_images,  # Use the original unmodified images
-            alpha=alpha,
+            alpha=self.alpha,
             targeted=True,
             clamp_min=self.image_min,
             clamp_max=self.image_max,

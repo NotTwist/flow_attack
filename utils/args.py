@@ -1,6 +1,10 @@
 import argparse
 
 
+epsilon = 8
+iterations = 20
+alpha = 0.01
+
 def parse_args():
     """
     Parse command-line arguments.
@@ -35,13 +39,17 @@ def parse_args():
                         help="Flag to save artifacts such as images and flows.")
     
     # Num of steps for iterative attacks
-    parser.add_argument('--steps', type=int, default=20,
+    parser.add_argument('--steps', type=int, default=iterations,
                         help="Number of steps for iterative attacks.")
     # Choose which iterations of iterative attacks will be saved for metrics
     parser.add_argument('--save_iterations', type=int, nargs='*', default=[], help="Save metrics for specified iterations of attack")
     
-    parser.add_argument('--epsilon', type=float, default=8/255.,
-                        help="Perturbation budget for attack.")
+    parser.add_argument('--epsilon', type=float, default=epsilon,
+                        help="Perturbation budget for an attack in pixels.")
+    
+    parser.add_argument('--alpha', type=float, default=alpha,
+                        help="Step sizew for an attack.")
+
     
     parser.add_argument("--no_softmax", action='store_true', help='Dont use softmax in cosine distance in CosPGD attack')
     return parser.parse_args()

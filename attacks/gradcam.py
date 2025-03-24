@@ -31,7 +31,7 @@ class GradCAMOpticalFlowAttack(OpticalFlowAttack):
     """
 
     def __init__(self, model, target: Literal['zero', 'neg_flow', 'untargeted'], epsilon = 0.03, device=None, num_steps=20, common_perturb=False, clipping=True, image_min=0, image_max=1, no_softmax=False):
-        super().__init__(model, epsilon, device, target=target, learned=False)
+        super().__init__(model, epsilon, alpha, device, target=target, learned=False)
         self.num_steps = num_steps
         self.common_perturb = common_perturb
         self.clipping = clipping
@@ -57,7 +57,7 @@ class GradCAMOpticalFlowAttack(OpticalFlowAttack):
         target = self.target(flow_pred)
         target = target.to(self.device)
         target.requires_grad = False
-        for step in range(self.num_steps):
+        for step in range(1, self.num_steps + 1):
             loss = self.scaled_loss(flow_pred, target, images)
 
             loss.backward()
@@ -72,14 +72,14 @@ class GradCAMOpticalFlowAttack(OpticalFlowAttack):
         return images
 
     def step(self, images, grads):
-        alpha = self.epsilon / self.num_steps
+        # alpha = self.epsilon / self.num_steps
         if not self.common_perturb:
             signs = grads.sign()  # Element-wise sign of gradients
         else:
             # Averaged sign across batch
             signs = grads.mean(dim=0, keepdim=True).sign()
 
-        perturbed_images = images - alpha * signs  # Apply perturbation
+        perturbed_images = images - self.alpha * signs  # Apply perturbation
 
         if self.clipping:
             perturbed_images = torch.clamp(

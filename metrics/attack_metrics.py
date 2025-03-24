@@ -32,6 +32,7 @@ class AttackMetricsTracker:
         mlflow.log_param("output_dir", args.output_dir)
         mlflow.log_param("no_softmax", args.no_softmax)
         mlflow.log_param("epsilon", args.epsilon)
+        mlflow.log_param("alpha", args.alpha)
         mlflow.log_param("saved_iterations", args.save_iterations)
 
         # Store save_iterations as a list of steps
@@ -112,12 +113,12 @@ class AttackMetricsTracker:
         """Update metrics for the current batch."""
         aee_attack = self.compute_aee(original_flow, attacked_flow)
         aee_attack_target = self.compute_aee(
-            original_flow, target_flow, mask=valid)
+            attacked_flow, target_flow)
 
         aee_gt = self.compute_aee(
-            original_flow, gt_flow) if gt_flow is not None else 0.0
+            original_flow, gt_flow, valid) if gt_flow is not None else 0.0
         aee_attacked_gt = self.compute_aee(
-            attacked_flow, gt_flow) if gt_flow is not None else 0.0
+            attacked_flow, gt_flow, valid) if gt_flow is not None else 0.0
         diff_error = aee_attacked_gt - aee_gt if gt_flow is not None else 0.0
         rec_error = self.compute_reconstruction_error(
             original_flow, inverse_flow) if inverse_flow is not None else 0.0
@@ -147,21 +148,22 @@ class AttackMetricsTracker:
 
         # Process dynamically defined iterations
         if self.save_iterations:
-            for step, attacked_flow in zip(self.save_iterations, tracked_flows):
+            for step in self.save_iterations:
+                attacked_flow = tracked_flows[step]
                 aee_attack = self.compute_aee(original_flow, attacked_flow)
                 aee_attack_target = self.compute_aee(
-                    original_flow, target_flow, mask=valid)
+                    attacked_flow, target_flow)
 
                 aee_gt = self.compute_aee(
-                    original_flow, gt_flow) if gt_flow is not None else 0.0
+                    original_flow, gt_flow, valid) if gt_flow is not None else 0.0
                 aee_attacked_gt = self.compute_aee(
-                    attacked_flow, gt_flow) if gt_flow is not None else 0.0
+                    attacked_flow, gt_flow, valid) if gt_flow is not None else 0.0
                 diff_error = aee_attacked_gt - aee_gt if gt_flow is not None else 0.0
                 rec_error = self.compute_reconstruction_error(
                     original_flow, inverse_flow) if inverse_flow is not None else 0.0
 
                 mlflow.log_metric(
-                    f"aee_attack_step_{step}", aee_attack, step=self.count)
+                    f"aee_init_attack_step_{step}", aee_attack, step=self.count)
                 mlflow.log_metric(
                     f"aee_target_attack_step_{step}", aee_attack_target, step=self.count)
                 if gt_flow is not None:

@@ -57,7 +57,10 @@ def main():
         flow_pred = compute_flow(model, "scaled_input_model", attacked_images)
         [flow_pred] = postprocess_flow(parsed_args.net, padder, flow_pred)
 
-        inverse_flow = None  # Assuming no inverse flow for this example
+        for step in tracked_flows:
+            tracked_flows[step] = postprocess_flow(parsed_args.net, padder, tracked_flows[step])[0]
+        
+        inverse_flow = None
         # Update metrics
         metrics_tracker.update(original_flow, flow_pred,
                                gt_flow=flow, target_flow=attack.target(original_flow), inverse_flow=inverse_flow, valid=valid, tracked_flows=tracked_flows)
@@ -65,11 +68,11 @@ def main():
         # Save artifacts if required
         if parsed_args.save_artifacts:
             metrics_tracker.save_artifact(
-                attacked_images[0], f"batch_{batch}_attacked_image", artifact_type="image")
+                attacked_images[0], f"batch_{batch:04d}_attacked_image", artifact_type="image")
             metrics_tracker.save_artifact(
-                flow_pred, f"batch_{batch}_attacked_flow", artifact_type="flow")
+                flow_pred, f"batch_{batch:04d}_attacked_flow", artifact_type="flow")
             metrics_tracker.save_artifact(
-                original_flow, f"batch_{batch}_init_flow", artifact_type="flow")
+                original_flow, f"batch_{batch:04d}_init_flow", artifact_type="flow")
 
     metrics_tracker.finalize()
 

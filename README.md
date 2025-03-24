@@ -8,9 +8,10 @@
 
 ## TODOS
 1. <s>Add saving iterations to FGSM, PGD</s>
-2. Run CosPGD, FGSM, PGD on full Kitti while saving iterations
+2. <s>Run CosPGD, FGSM, PGD on full Kitti while saving iterations</s>
 3. Create .ipynb for graph creation
-4. Add MI-FGSM, APGD
-5. Add ptlflow
+4. Rewrite get_attacks and use configs for attacks
+5. Add MI-FGSM, APGD
+6. Add ptlflow
 
 

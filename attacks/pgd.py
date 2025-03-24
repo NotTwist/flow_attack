@@ -14,9 +14,9 @@ class PGDOpticalFlowAttack(OpticalFlowAttack):
     ball after each update.
     """
 
-    def __init__(self, model, target: Literal['zero', 'neg_flow', 'untargeted'], epsilon=0.03, device=None, num_steps=20,
+    def __init__(self, model, target: Literal['zero', 'neg_flow', 'untargeted'], epsilon=0.03, alpha: float = 0.01, device=None, num_steps=20,
                  common_perturb=False, clipping=True, image_min=0, image_max=1, save_iterations: list = []):
-        super().__init__(model, epsilon, device, target=target, learned=False)
+        super().__init__(model, epsilon, alpha, device, target=target, learned=False)
         self.num_steps = num_steps
         self.common_perturb = common_perturb
         self.clipping = clipping
@@ -39,15 +39,6 @@ class PGDOpticalFlowAttack(OpticalFlowAttack):
         images = functions.init_linf(
             orig_images, epsilon=self.epsilon, clamp_min=self.image_min, clamp_max=self.image_max
         )
-        # # --- Random Initialization ---
-        # # Add uniform noise in [-epsilon, epsilon] and clip to valid image range
-        # random_noise = torch.empty_like(
-        #     orig_images).uniform_(-self.epsilon, self.epsilon)
-        # images = orig_images + random_noise
-        # images = torch.clamp(images, self.image_min, self.image_max)
-        # # Ensure the perturbation is within the epsilon-ball
-        # images = torch.min(torch.max(images, orig_images -
-        #                    self.epsilon), orig_images + self.epsilon)
 
         images.requires_grad = True
 
@@ -61,7 +52,7 @@ class PGDOpticalFlowAttack(OpticalFlowAttack):
         # Dictionary to store flow outputs at specific iterations
         tracked_flows = {}
 
-        for step in range(self.num_steps):
+        for step in range(1, self.num_steps + 1):
             loss = self.loss(flow_pred, target)
             self.model.zero_grad()
             loss.backward()
@@ -85,14 +76,14 @@ class PGDOpticalFlowAttack(OpticalFlowAttack):
         }
 
     def step(self, images, grads, orig_images):
-        alpha = self.epsilon / self.num_steps
+        #alpha = 0.01 #self.epsilon / self.num_steps
 
         perturbed_images = functions.step_inf(
             perturbed_image=images,
             epsilon=self.epsilon,
             data_grad=grads,
             orig_image=orig_images,  # Use the original unmodified images
-            alpha=alpha,
+            alpha=self.alpha,
             targeted=True,
             clamp_min=self.image_min,
             clamp_max=self.image_max,
