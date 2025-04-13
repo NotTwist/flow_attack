@@ -75,15 +75,14 @@ class Attack(object):
 
     def get_logits(self, inputs, *args, **kwargs):
         if isinstance(inputs, dict):
-            print(1111)
-            images = inputs.squeeze(0)
+            images = inputs["images"].squeeze(0)
         elif torch.is_tensor(inputs):
             images = inputs
         else:
             raise ValueError
         if self._normalization_applied is False:
             images = self.normalize(images)
-            inputs = images.unsqueeze(0)
+            inputs["images"] = images.unsqueeze(0)
         logits = self.model(inputs)
         return logits
 
@@ -507,16 +506,16 @@ class Attack(object):
         self._change_model_mode(given_training)
 
         if self._normalization_applied is True:
-            images = inputs.squeeze(0)
+            images = inputs["images"].squeeze(0)
             inputs = self.inverse_normalize(images)
-            inputs = images.unsqueeze(0)
+            inputs["images"] = images.unsqueeze(0)
             self._set_normalization_applied(False)
 
             adv_inputs = self.forward(inputs, *args, **kwargs)
             # adv_inputs = self.to_type(adv_inputs, self.return_type)
-            adv_images = adv_inputs
+            adv_images = adv_inputs["images"]
             adv_images = self.normalize(adv_images)
-            adv_inputs = adv_images
+            adv_inputs["images"] = adv_images
             self._set_normalization_applied(True)
         else:
             adv_inputs = self.forward(inputs, *args, **kwargs)

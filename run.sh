@@ -1,48 +1,47 @@
 #!/bin/bash
 
 # List of epsilon values to test
-epsilons=("1./255." "2./255." "4./255." "8./255.")
-
+alphas=( "0.005" "0.01" "0.02" "0.04" "0.1")
 # Loop over each epsilon value
-for epsilon in "${epsilons[@]}"; do
-  echo "Running CosPGD attack with epsilon=$epsilon and softmax enabled"
+for alpha in "${alphas[@]}"; do
+  echo "Running CosPGD attack with alpha=$alpha and softmax enabled"
   python run_attack_ptlflow.py \
-    --net raft \
-    --attack CosPGD \
-    --epsilon $(bc <<< "scale=5; $epsilon") \
-    --alpha 0.01 \
+    --model_name raft \
+    --attack_type CosPGD \
+    --alpha $alpha \
     --steps 40 \
     --target zero \
-    --save_iterations 3 5 10 15 20 25 30 35 40
+    --small_run \
+    --saved_iterations 3 5 10 15 20 25 30 35 40
 
-  echo "Running PGD attack with epsilon=$epsilon"
+  echo "Running PGD attack with alpha=$alpha"
   python run_attack_ptlflow.py \
-    --net raft \
-    --attack PGD \
-    --epsilon $(bc <<< "scale=5; $epsilon") \
-    --alpha 0.01 \
+    --model_name raft \
+    --attack_type PGD \
+    --alpha $alpha \
     --steps 40 \
     --target zero \
-    --save_iterations 3 5 10 15 20 25 30 35 40
+    --small_run \
+    --saved_iterations 3 5 10 15 20 25 30 35 40
 
-  echo "Running FGSM attack with epsilon=$epsilon"
+  echo "Running FGSM attack with alpha=$alpha"
   python run_attack_ptlflow.py \
-    --net raft \
-    --attack FGSM \
-    --epsilon $(bc <<< "scale=5; $epsilon") \
-    --alpha 0.01 \
+    --model_name raft \
+    --attack_type FGSM \
+    --alpha $alpha \
     --steps 40 \
     --target zero \
-    --save_iterations 3 5 10 15 20 25 30 35 40
+    --small_run \
+    --saved_iterations 3 5 10 15 20 25 30 35 40
 
-  echo "Running MIFGSM attack with epsilon=$epsilon"
+  echo "Running MIFGSM attack with alpha=$alpha"
   python run_attack_ptlflow.py \
-    --net raft \
-    --attack MIFGSM \
-    --epsilon $(bc <<< "scale=5; $epsilon") \
-    --alpha 0.01 \
+    --model_name raft \
+    --attack_type MIFGSM \
+    --alpha $alpha \
     --steps 40 \
     --target zero \
-    --save_iterations 3 5 10 15 20 25 30 35 40
+    --small_run \
+    --saved_iterations 3 5 10 15 20 25 30 35 40
 
 done

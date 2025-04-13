@@ -45,14 +45,14 @@ def main():
 
     # Import and load the model
     # Get available checkpoints for a specific model (e.g., RAFT)
-    model = load_model(args.net, args.dataset.lower()).to(device)
+    model = load_model(args.model_name, args.dataset.lower()).to(device)
     model.eval()
     for param in model.parameters():
         param.requires_grad = False
 
     # Set the attack based on argument
-    attack = get_attack(args.attack, model, num_steps=args.steps, no_softmax=args.no_softmax,
-                        target=args.target, epsilon=args.epsilon, save_iterations=args.save_iterations)
+    attack = get_attack(args.attack_type, model, num_steps=args.steps, no_softmax=args.no_softmax,
+                        target=args.target, epsilon=args.epsilon, save_iterations=args.saved_iterations, alpha=args.alpha, target_layer=args.target_layer, use_map_scaling=args.use_map_scaling)
 
     # Loop over data batches
     for batch, (images, flow, valid) in enumerate(tqdm(data_loader)):
@@ -71,6 +71,7 @@ def main():
 
         tracked_flows = attack_result["tracked_flows"]
         attacked_images = attack_result["final_images"]
+        masks = attack_result.get('tracked_masks', None)
         with torch.no_grad():
             flow_pred = model(attacked_images)['flows'].squeeze(0)
 
@@ -81,6 +82,10 @@ def main():
 
         # Save artifacts if required
         if args.save_artifacts:
+            if masks is not None:
+                for step in masks:
+                    metrics_tracker.save_artifact(
+                        masks[step], f"batch_{batch:04d}_mask_step_{step}", artifact_type="image")
             metrics_tracker.save_artifact(
                 get_image_tensors(inputs)[0], f"batch_{batch:04d}_attacked_image", artifact_type="image")
             metrics_tracker.save_artifact(

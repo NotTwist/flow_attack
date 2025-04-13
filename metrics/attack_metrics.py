@@ -17,28 +17,32 @@ class AttackMetricsTracker:
 
         if run_name is None:
             current_date = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-            run_name = f"{args.net}_{args.attack}_{args.dataset}_{current_date}"
+            run_name = f"{args.model_name}_{args.attack_type}_{args.dataset}_{current_date}"
 
         mlflow.start_run(run_name=run_name)
         print(
             f"Running experiment: {experiment_name}, with run name: {run_name}")
 
         # Log parameters
-        mlflow.log_param("model_name", args.net)
-        mlflow.log_param("attack_type", args.attack)
-        mlflow.log_param("target", args.target)
-        mlflow.log_param("steps", args.steps)
-        mlflow.log_param("dataset", args.dataset)
-        mlflow.log_param("small_run", args.small_run)
-        mlflow.log_param("output_dir", args.output_dir)
-        mlflow.log_param("no_softmax", args.no_softmax)
-        mlflow.log_param("epsilon", args.epsilon)
-        mlflow.log_param("alpha", args.alpha)
-        mlflow.log_param("saved_iterations", args.save_iterations)
+        args_dict = vars(args)
+        mlflow.log_params(args_dict)
+        # mlflow.log_param("model_name", args.net)
+        # mlflow.log_param("attack_type", args.attack)
+        # mlflow.log_param("target", args.target)
+        # mlflow.log_param("steps", args.steps)
+        # mlflow.log_param("dataset", args.dataset)
+        # mlflow.log_param("small_run", args.small_run)
+        # mlflow.log_param("output_dir", args.output_dir)
+        # mlflow.log_param("no_softmax", args.no_softmax)
+        # mlflow.log_param("epsilon", args.epsilon)
+        # mlflow.log_param("alpha", args.alpha)
+        # mlflow.log_param("saved_iterations", args.save_iterations)
+        # if args.target_layer:
+        #     mlflow.log_param("target_layer", args.target_layer)
 
         # Store save_iterations as a list of steps
         # Ensure it’s a list
-        self.save_iterations = args.save_iterations if args.save_iterations else []
+        self.saved_iterations = args.saved_iterations if args.saved_iterations else []
         self.reset()
 
     def reset(self):
@@ -54,7 +58,7 @@ class AttackMetricsTracker:
         self.count = 0
 
         # Dynamically add metric keys for custom iterations
-        for step in self.save_iterations:
+        for step in self.saved_iterations:
             self.cumulative_metrics.update({
                 f"aee_init_attack_step_{step}": 0.0,
                 f"aee_init_gt_step_{step}": 0.0,
@@ -148,8 +152,8 @@ class AttackMetricsTracker:
                               rec_error, step=self.count)
 
         # Process dynamically defined iterations
-        if self.save_iterations:
-            for step in self.save_iterations:
+        if self.saved_iterations:
+            for step in self.saved_iterations:
                 attacked_flow = tracked_flows[step]
                 aee_attack = self.compute_aee(original_flow, attacked_flow)
                 aee_attack_target = self.compute_aee(

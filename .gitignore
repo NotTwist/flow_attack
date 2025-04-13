@@ -6,6 +6,7 @@ __pycache__/
 env/
 *.env
 *.log
+*.zip 
 
 datasets/
 models/_pretrained_weights/

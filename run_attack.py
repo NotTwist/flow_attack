@@ -27,21 +27,21 @@ def main():
     print(f"Setting Device to {device}\n")
 
     # Import and load the model
-    model = import_and_load(parsed_args.net, make_unit_input=not model_takes_unit_input(parsed_args.net),
+    model = import_and_load(parsed_args.model_name.upper(), make_unit_input=not model_takes_unit_input(parsed_args.model_name.upper()),
                             make_scaled_input_model=True, device=device)
     model.eval()
     for param in model.parameters():
         param.requires_grad = False
 
     # Set the attack based on argument
-    attack = get_attack(parsed_args.attack, model, num_steps=parsed_args.steps, no_softmax=parsed_args.no_softmax,
-                        target=parsed_args.target, epsilon=parsed_args.epsilon, save_iterations=parsed_args.save_iterations)
+    attack = get_attack(parsed_args.attack_type, model, num_steps=parsed_args.steps, no_softmax=parsed_args.no_softmax,
+                        target=parsed_args.target, epsilon=parsed_args.epsilon, save_iterations=parsed_args.saved_iterations)
 
     # Loop over data batches
     for batch, (images, flow, valid) in enumerate(tqdm(data_loader)):
         images = images.permute(1, 0, 2, 3, 4)
         images = images / 255.0
-        padder, images = preprocess_img(parsed_args.net, images)
+        padder, images = preprocess_img(parsed_args.model_name, images)
         images = images.detach().to(device)
         images.requires_grad = True
 
@@ -53,7 +53,6 @@ def main():
         # Perform the attack
 
         attack_result = attack.attack(images)
-
         tracked_flows = attack_result["tracked_flows"]
         attacked_images = attack_result["final_images"]
         flow_pred = compute_flow(model, "scaled_input_model", attacked_images)

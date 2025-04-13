@@ -2,7 +2,8 @@ import torch
 from .attack_base import OpticalFlowAttack
 from models.model_utils import compute_flow
 from .adversarial_attacks_pytorch.torchattacks import APGD
-from typing import Literal
+from typing import Literal, Dict
+from utils.process_images import get_image_tensors, get_image_grads, get_flow_tensors, replace_images_dic
 
 
 class FlowModelWrapper(torch.nn.Module):
@@ -16,17 +17,17 @@ class FlowModelWrapper(torch.nn.Module):
         return compute_flow(self.model, self.mode, x)
 
 
-
 class APGDOpticalFlowAttack(OpticalFlowAttack):
-    def __init__(self, model, target: Literal['zero', 'neg_flow', 'untargeted'], epsilon=0.03, device=None, num_steps=20, common_perturb=False, clipping=True, image_min=0, image_max=1):
+    def __init__(self, model, target: Literal['zero', 'neg_flow', 'untargeted'], epsilon=0.03, device=None, num_steps=20, common_perturb=False, clipping=True, image_min=0, image_max=1, save_iterations: list = []):
         super().__init__(model, epsilon, device, learned=False, target=target)
         self.num_steps = num_steps
         self.common_perturb = common_perturb
         self.clipping = clipping
         self.image_max = image_max
         self.image_min = image_min
+        self.save_iterations = save_iterations
 
-    def attack(self, images: torch.Tensor):
+    def attack(self, inputs: Dict[str, torch.Tensor]):
         """
         Generates adversarial images using FGSM.
 
@@ -37,21 +38,18 @@ class APGDOpticalFlowAttack(OpticalFlowAttack):
         Returns:
             torch.Tensor: Adversarial images.
         """
-        wrapped_model = FlowModelWrapper(self.model)
-        images = images.clone().detach().to(self.device)
-        images.requires_grad = True
-        # print(images.shape)
-        flow_pred = wrapped_model(images)
+        # inputs = inputs.clone().detach().to(self.device)
+        # inputs.requires_grad = True
+        flow_pred = self.model(inputs)['flows'].squeeze(0)
 
-        flow_pred = flow_pred.to(self.device)
         target = self.target(flow_pred)
         target = target.to(self.device)
         target.requires_grad = False
-        
-        attack = APGD(wrapped_model, loss=self.loss, norm="Linf", eps=self.epsilon,
-                      verbose=False, steps=self.num_steps, n_restarts=1, seed=0, rho=0.75, eot_iter=1)
+        attack = APGD(self.model, loss='epe', norm="Linf", eps=self.epsilon,
+                      verbose=False, steps=self.num_steps, n_restarts=1, seed=0, rho=0.75, eot_iter=1, save_iterations=self.save_iterations)
         # for targeted attacks
         attack.targeted = True
         attack.set_mode_targeted_by_label()
-        images = attack(images, target)
-        return images
+        images, tracked_flows = attack(inputs['images'], target)
+        inputs['images'] = images
+        return {"final_images": inputs, "tracked_flows": tracked_flows}

@@ -6,6 +6,7 @@ import torch
 import torch.nn as nn
 
 from ..attack import Attack
+from ....attack_utils.loss_criterion import LossCriterion
 
 
 class APGD(Attack):
@@ -51,6 +52,7 @@ class APGD(Attack):
         eot_iter=1,
         rho=0.75,
         verbose=False,
+        save_iterations:list = []
     ):
         super().__init__("APGD", model)
         self.eps = eps
@@ -63,12 +65,13 @@ class APGD(Attack):
         self.thr_decr = rho
         self.verbose = verbose
         self.supported_mode = ["default", "targeted"]
+        self.save_iterations = save_iterations
 
     def forward(self, images, labels):
         r"""
         Overridden.
         """
-        images = images.squeeze(1)
+        images = images.squeeze(0)
         labels = labels.squeeze(0)
 
         if self.targeted:
@@ -76,9 +79,9 @@ class APGD(Attack):
 
         images = images.clone().detach().to(self.device)
         labels = labels.clone().detach().to(self.device)
-        _, adv_images = self.perturb(images, labels, cheap=True)
+        _, adv_images, tracked_flows = self.perturb(images, labels, cheap=True)
 
-        return adv_images
+        return adv_images, tracked_flows
 
     def check_oscillation(self, x, j, k, y5, k3=0.75):
         t = np.zeros(x.shape[1])
@@ -101,7 +104,7 @@ class APGD(Attack):
         ) / (x_sorted[:, -1] - x_sorted[:, -3] + 1e-12)
 
     def attack_single_run(self, images_orig, lables_orig):
-        # print(images_orig.shape)
+        tracked_flows = {}
         images = (
             images_orig.clone()
             if len(images_orig.shape) == 4
@@ -182,7 +185,7 @@ class APGD(Attack):
             # TODO: is dlr applicable for Optical Flow?
             # criterion_indiv = self.dlr_loss
             raise ValueError("dlr not implemented")
-        criterion_indiv = self.loss
+        criterion_indiv = LossCriterion(self.loss)
 
         images_adv = torch.cat((image_1_adv, image_2_adv)).unsqueeze(0)
         images_adv.requires_grad_(True)
@@ -402,11 +405,13 @@ class APGD(Attack):
             images_adv.requires_grad_(True)
             grad = torch.zeros_like(images.unsqueeze(0))
             images_adv_dic = {"images": images_adv}
-            for _ in range(self.eot_iter):
+            for j in range(self.eot_iter):
                 with torch.enable_grad():
                     # 1 forward pass (eot_iter = 1)
                     preds_dic = self.get_logits(images_adv_dic)
                     preds = preds_dic["flows"].squeeze(0)
+                    if j == 0 and (i+1) in self.save_iterations:
+                        tracked_flows[i+1] = preds.detach().cpu().clone()
                     loss_indiv = criterion_indiv.loss(preds, lables)
                     loss = loss_indiv.mean()
 
@@ -474,7 +479,7 @@ class APGD(Attack):
                     counter3 = 0
                     k = np.maximum(k - self.size_decr, self.steps_min)
 
-        return images_best, None, loss_best, images_best_adv
+        return images_best, tracked_flows, loss_best, images_best_adv
 
     def perturb(self, images_orig, labels_orig, best_loss=False, cheap=True):
         assert self.norm in ["Linf", "L2"]
@@ -524,7 +529,7 @@ class APGD(Attack):
                     )  # nopep8
                     (
                         images_best_curr,
-                        epe_curr,
+                        tracked_flows,
                         loss_curr,
                         images_adv_curr,
                     ) = self.attack_single_run(
@@ -541,7 +546,7 @@ class APGD(Attack):
                             )
                         )
                     epe_score = None
-            return epe_score, images_adv
+            return epe_score, images_adv, tracked_flows
 
         else:
             images_adv_best = images.detach().clone()
@@ -550,7 +555,7 @@ class APGD(Attack):
 
             pdb.set_trace()
             for counter in range(self.n_restarts):
-                images_best_curr, _, loss_curr, _ = self.attack_single_run(
+                images_best_curr, tracked_flows, loss_curr, _ = self.attack_single_run(
                     images, lables
                 )
                 ind_curr = (loss_curr > loss_best).nonzero().squeeze()
@@ -560,7 +565,7 @@ class APGD(Attack):
                 if self.verbose:
                     print("restart {} - loss: {:.5f}".format(counter, loss_best.sum()))
 
-            return loss_best, images_adv_best
+            return loss_best, images_adv_best, tracked_flows
 
 
 @staticmethod
