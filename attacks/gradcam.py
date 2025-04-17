@@ -79,13 +79,14 @@ class GradCAMOpticalFlowAttack(OpticalFlowAttack):
         target = target.to(self.device)
         target.requires_grad = False
 
+        target_gradcam = self.apply_gradcam(orig_images, target).detach()
+        
         tracked_flows = {}
         tracked_masks = {}
         
-        target_mask = self.apply_gradcam(inputs, )
         for step in range(1, self.num_steps + 1):
-            loss, mask = self.scaled_loss(
-                flow_pred, target, get_image_tensors(inputs))
+            loss, mask = self.gradcam_difference_loss(
+                get_image_tensors(inputs), target_gradcam, target)
             self.model.zero_grad()
             loss.backward()
             images = get_image_tensors(inputs)
@@ -121,6 +122,18 @@ class GradCAMOpticalFlowAttack(OpticalFlowAttack):
         )
 
         return perturbed_images
+
+    def gradcam_difference_loss(self, images, target_gradcam, target):
+        """
+        Computes the L2 difference between GradCAM maps of the original (target) and adversarial images.
+        """
+        adv_gradcam = self.apply_gradcam(
+            images, target)  # Apply on current (adv) images
+
+        # Compute L2 loss between gradcam masks
+        loss = F.mse_loss(adv_gradcam, target_gradcam)
+
+        return loss, adv_gradcam
 
     def scaled_loss(self, flow_pred, target, images):
         """

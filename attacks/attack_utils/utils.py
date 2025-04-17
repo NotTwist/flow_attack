@@ -1,3 +1,5 @@
+import cv2
+import numpy as np
 import torch
 from typing import Dict
 import copy
@@ -129,3 +131,50 @@ def input_diversity(images: torch.Tensor, prob: float = 0.5, low: int = 224, hig
         return images_padded
     else:
         return images
+
+
+def apply_sobel(images):
+    """
+    Вычисляет карту границ изображения с помощью оператора Собеля.
+    :param images: Входные изображения (тензор [B, C, H, W])
+    :return: Карта границ (тензор [B, 1, H, W])
+    """
+    images_np = images.detach().cpu().numpy()  # Переводим в numpy для OpenCV
+    edge_maps = []
+
+    for img in images_np:
+        img_gray = np.mean(img, axis=0)  # Градации серого
+        sobel_x = cv2.Sobel(img_gray, cv2.CV_64F, 1, 0, ksize=3)
+        sobel_y = cv2.Sobel(img_gray, cv2.CV_64F, 0, 1, ksize=3)
+        edge_map = np.sqrt(sobel_x**2 + sobel_y**2)  # Магнитуда градиента
+        edge_map = edge_map / (edge_map.max() + 1e-8)  # Нормализация
+        edge_maps.append(edge_map)
+
+    edge_maps = np.array(edge_maps)[:, None, :, :]  # Добавляем канал
+    return torch.tensor(edge_maps, device=images.device, dtype=images.dtype)
+
+
+def apply_high_frequency_mask(images, kernel_size=5, sigma=1.0):
+    """
+    Вычисляет маску высоких частот путем вычитания размытых данных от исходного изображения.
+
+    :param images: тензор изображений [B, C, H, W]
+    :param kernel_size: размер ядра Гауссова размытия (нечетное число)
+    :param sigma: стандартное отклонение для Гауссова размытия
+    :return: тензор масок высоких частот [B, 1, H, W]
+    """
+    images_np = images.detach().cpu().numpy()
+    hf_maps = []
+    for img in images_np:
+        # Усредняем по каналам для получения изображения в оттенках серого
+        img_gray = np.mean(img, axis=0)
+        # Применяем Гауссово размытие
+        img_blur = cv2.GaussianBlur(
+            img_gray, (kernel_size, kernel_size), sigma)
+        # Вычисляем разницу (абсолютное значение) между исходным и размытым изображением
+        hf = np.abs(img_gray - img_blur)
+        # Нормализуем карту в диапазон [0, 1]
+        hf = hf / (hf.max() + 1e-8)
+        hf_maps.append(hf)
+    hf_maps = np.array(hf_maps)[:, None, :, :]  # добавляем ось для канала
+    return torch.tensor(hf_maps, device=images.device, dtype=images.dtype)

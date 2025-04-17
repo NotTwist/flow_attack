@@ -15,7 +15,7 @@ class CosPGDOpticalFlowAttack(OpticalFlowAttack):
     """
 
     def __init__(self, model, target: Literal['zero', 'neg_flow', 'untargeted'], epsilon = 0.03, alpha = 0.01, device=None, num_steps=20, common_perturb=False, clipping=True, image_min=0, image_max=1, no_softmax=False, save_iterations: list = []):
-        super().__init__(model, epsilon, alpha, device,target=target, learned=False)
+        super().__init__(model, epsilon, alpha, device,target=target, learned=False, loss='epe')
         self.num_steps = num_steps
         self.common_perturb = common_perturb
         self.clipping = clipping

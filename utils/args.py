@@ -53,7 +53,8 @@ def parse_args():
     
     parser.add_argument("--no_softmax", action='store_true', help='Dont use softmax in cosine distance in CosPGD attack')
     
-    parser.add_argument("--target_layer", type=str,
+    parser.add_argument("--target_layer", type=str, default='update_block.mask',
                         choices=['update_block.mask', 'cnet.conv2', 'update_block.flow_head'], help="Choose which layer will be used for GradCAM attack (works only for raft)")
     parser.add_argument('--use_map_scaling', action='store_true', help = 'Apply exponential transformation to GradCAM map')
+    parser.add_argument('--scaling_type', default='none', choices=['none', 'cospgd', 'high_freq', 'sobel'], help='Apply scaling to method (workds for MI-FGSM only)')
     return parser.parse_args()

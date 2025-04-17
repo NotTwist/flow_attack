@@ -206,6 +206,8 @@ def get_loss(f_type, mask=None):
         similarity_term = f_cosim
     elif f_type == "mse":
         similarity_term = f_mse
+    elif f_type == 'epe':
+        similarity_term = epe
     else:
         raise (NotImplementedError,
                "The requested loss type %s does not exist. Please choose one of 'aee', 'mse' or 'cosim'" % (f_type))

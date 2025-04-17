@@ -25,7 +25,6 @@ def load_model(model_name, dataset):
     print(f"No pre-trained model available for {model}/{dataset}.")
     return None
 
-
 def main():
     # Parse arguments using the separate args.py file
     args = parse_args()
@@ -52,7 +51,7 @@ def main():
 
     # Set the attack based on argument
     attack = get_attack(args.attack_type, model, num_steps=args.steps, no_softmax=args.no_softmax,
-                        target=args.target, epsilon=args.epsilon, save_iterations=args.saved_iterations, alpha=args.alpha, target_layer=args.target_layer, use_map_scaling=args.use_map_scaling)
+                        target=args.target, epsilon=args.epsilon, save_iterations=args.saved_iterations, alpha=args.alpha, target_layer=args.target_layer, use_map_scaling=args.use_map_scaling, scaling_type=args.scaling_type)
 
     # Loop over data batches
     for batch, (images, flow, valid) in enumerate(tqdm(data_loader)):
@@ -72,6 +71,7 @@ def main():
         tracked_flows = attack_result["tracked_flows"]
         attacked_images = attack_result["final_images"]
         masks = attack_result.get('tracked_masks', None)
+        deltas = torch.clamp(get_image_tensors(attacked_images).detach().cpu(), 0, 1) - images.squeeze(0)
         with torch.no_grad():
             flow_pred = model(attacked_images)['flows'].squeeze(0)
 
@@ -92,6 +92,8 @@ def main():
                 flow_pred, f"batch_{batch:04d}_attacked_flow", artifact_type="flow")
             metrics_tracker.save_artifact(
                 original_flow, f"batch_{batch:04d}_init_flow", artifact_type="flow")
+            metrics_tracker.save_artifact(
+                deltas[0], f"batch_{batch:04d}_delta", artifact_type="image")
 
     metrics_tracker.finalize()
 

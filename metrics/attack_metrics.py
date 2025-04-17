@@ -212,6 +212,7 @@ class AttackMetricsTracker:
     def save_image(self, image, filename):
         if torch.is_tensor(image):
             image = image.detach().cpu().numpy()
+            
             if image.ndim == 4:
                 image = image.squeeze(0)
             if image.ndim == 3:
@@ -223,12 +224,13 @@ class AttackMetricsTracker:
 
         # Check the min and max values
         min_val, max_val = image.min(), image.max()
-
-        if min_val >= 0.0 and max_val <= 1.0:
+        if min_val < 0.0 or max_val > 1.0:
+            # Если диапазон не [0,1], выполняем линейное масштабирование
+            # 1e-8 для защиты от деления на 0
+            image = (image - min_val) / (max_val - min_val + 1e-8)
             image = (image * 255).astype(np.uint8)
         else:
-            image = image.astype(np.uint8)
-
+            image = (image * 255).astype(np.uint8)
         return cv2.imwrite(filename, image)
 
     def save_artifact(self, artifact, name, artifact_type: Literal["image", "flow", "tensor"] = "image"):

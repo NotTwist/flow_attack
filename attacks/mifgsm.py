@@ -1,5 +1,7 @@
 import torch
 import torch.nn.functional as F
+
+from .attack_utils.utils import apply_high_frequency_mask, apply_sobel
 from .attack_base import OpticalFlowAttack
 import numpy as np
 from models.model_utils import compute_flow
@@ -15,8 +17,8 @@ class MIFGSMOpticalFlowAttack(OpticalFlowAttack):
 
     def __init__(self, model, target: Literal['zero', 'neg_flow', 'untargeted'], epsilon=0.03, alpha: float = 0.01,
                  decay: float = 1.0, device=None, num_steps=20, common_perturb=False, clipping=True,
-                 image_min=0, image_max=1, save_iterations: list = []):
-        super().__init__(model, epsilon, alpha, device, target=target, learned=False)
+                 image_min=0, image_max=1, scaling_type: Literal['sobel', 'high_freq', 'cospgd', 'none'] = 'none', save_iterations: list = []):
+        super().__init__(model, epsilon, alpha, device, target=target, learned=False, loss='epe')
         self.num_steps = num_steps
         self.decay = decay  # momentum decay factor
         self.common_perturb = common_perturb
@@ -24,6 +26,7 @@ class MIFGSMOpticalFlowAttack(OpticalFlowAttack):
         self.image_max = image_max
         self.image_min = image_min
         self.save_iterations = save_iterations
+        self.scaling_type = scaling_type
 
     def attack(self, inputs: torch.Tensor):
         """
@@ -50,12 +53,13 @@ class MIFGSMOpticalFlowAttack(OpticalFlowAttack):
         tracked_flows = {}
 
         for step in range(1, self.num_steps + 1):
-            loss = self.loss(flow_pred, target)
+            loss, _ = self.scaled_loss(
+                flow_pred, target, get_image_tensors(inputs))        
             self.model.zero_grad()
             loss.backward()
             grads = get_image_grads(inputs)
             images = get_image_tensors(inputs)
-            
+        
             grad_norm = torch.norm(grads, p=1) + 1e-8
             momentum = self.decay * momentum + grads / grad_norm
             
@@ -72,6 +76,31 @@ class MIFGSMOpticalFlowAttack(OpticalFlowAttack):
             "final_images": inputs,
             "tracked_flows": tracked_flows,
         }
+
+    def scaled_loss(self, flow_pred, target, images):
+        """
+        Домножает лосс на карту границ, полученную с фильтром Собеля.
+        """
+        raw_loss = self.loss(flow_pred, target)
+        if self.scaling_type == 'sobel':
+            mask = apply_sobel(
+                images).detach()  # Генерируем карту границ
+        elif self.scaling_type == 'high_freq':
+            mask = apply_high_frequency_mask(images).detach()
+        elif self.scaling_type == 'low_freq':
+            pass
+        elif self.scaling_type == 'cospgd':
+            loss = functions.cospgd_scale(
+                predictions=flow_pred, labels=target.float(), loss=raw_loss, targeted=True, one_hot=False
+            )
+            return loss.mean(), None
+        elif self.scaling_type == 'none':
+            return raw_loss.mean(), None
+
+        if raw_loss.dim() == 4 and raw_loss.size(1) != mask.size(1):
+            mask = mask.expand(-1, raw_loss.size(1), -1, -1)
+
+        return (raw_loss * mask).mean(), mask
 
     def step(self, images, momentum, orig_images):
         """

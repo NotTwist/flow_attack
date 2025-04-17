@@ -14,7 +14,7 @@ from .vnifgsm import VNIFGSMOpticalFlowAttack
 from typing import Literal
 
 
-def get_attack(attack_name, model, target: Literal['zero', 'neg_flow', 'untargeted'], epsilon=0.005, alpha=0.01, num_steps=20, no_softmax=True, save_iterations: list = [], target_layer: str = None, use_map_scaling=False):
+def get_attack(attack_name, model, target: Literal['zero', 'neg_flow', 'untargeted'], epsilon=0.005, alpha=0.01, num_steps=20, no_softmax=True, save_iterations: list = [], target_layer: str = None, use_map_scaling=False, scaling_type=''):
     """
     Select the attack based on the attack name string.
 
@@ -41,7 +41,7 @@ def get_attack(attack_name, model, target: Literal['zero', 'neg_flow', 'untarget
     elif attack_name == 'APGD':
         return APGDOpticalFlowAttack(model=model, epsilon=epsilon, num_steps=num_steps, target=target, save_iterations=save_iterations)
     elif attack_name == 'MIFGSM':
-        return MIFGSMOpticalFlowAttack(model=model, epsilon=epsilon, alpha=alpha, num_steps=num_steps, target=target, save_iterations=save_iterations)
+        return MIFGSMOpticalFlowAttack(model=model, epsilon=epsilon, alpha=alpha, num_steps=num_steps, target=target, scaling_type=scaling_type, save_iterations=save_iterations)
     elif attack_name == 'Sobel':
         return ScaledLossOpticalFlowAttack(model=model, epsilon=epsilon, alpha=alpha, num_steps=num_steps, target=target, save_iterations=save_iterations, scaling_type='sobel', use_map_scaling=use_map_scaling)
     elif attack_name == 'HighFreq':
