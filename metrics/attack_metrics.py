@@ -4,7 +4,7 @@ import numpy as np
 import mlflow
 import cv2
 from typing import Literal
-from utils.process_images import quickvis_flow
+from utils.process_images import quickvis_flow, save_depth
 from datetime import datetime
 from ptlflow.utils import flow_utils
 import cv2 as cv
@@ -54,6 +54,8 @@ class AttackMetricsTracker:
             "gt_diff_error": 0.0,
             "reconstruction_error": 0.0,
             "aee_target_attack": 0.0,
+            "mde_rmse_init_attack": 0.0,
+            "mde_rmse_target_attack": 0.0
         }
         self.count = 0
 
@@ -66,6 +68,8 @@ class AttackMetricsTracker:
                 f"gt_diff_error_step_{step}": 0.0,
                 f"reconstruction_error_step_{step}": 0.0,
                 f"aee_target_attack_step_{step}": 0.0,
+                f"mde_rmse_init_attack_step_{step}": 0.0,
+                f"mde_rmse_target_attack_step_{step}": 0.0
             })
 
     def compute_aee(self, flow1, flow2, mask=None):
@@ -113,8 +117,52 @@ class AttackMetricsTracker:
         error = np.linalg.norm(flow - inverse_flow, axis=0)
         return np.mean(error)
 
+        
+    def compute_rmse(self, pred_depth: torch.Tensor, gt_depth: torch.Tensor, mask: torch.Tensor = None) -> torch.Tensor:
+        """
+        Compute RMS Error between predicted and ground-truth depth maps.
 
-    def update(self, original_flow, attacked_flow, gt_flow=None, target_flow=None, inverse_flow=None, valid=None, tracked_flows=None):
+        Args:
+            pred_depth: Tensor of shape [B,1,H,W] or [1,H,W] of predicted depths.
+            gt_depth:   Tensor of same shape as pred_depth of ground truth depths.
+            mask:       Optional boolean mask tensor of shape [B,1,H,W] or [1,H,W]; only masked pixels contribute.
+
+        Returns:
+            Tensor of shape [B] containing per-sample RMSE.
+        """
+        # ensure same shape
+        # print(pred_depth.max())
+        if pred_depth.ndim == 3:
+            pred_depth = pred_depth.unsqueeze(1)
+        if gt_depth.ndim == 3:
+            gt_depth = gt_depth.unsqueeze(1)
+        # optional mask
+        if mask is None:
+            mask = torch.ones_like(gt_depth, dtype=torch.bool)
+        # compute squared error
+        diff = pred_depth - gt_depth
+        sq = diff.pow(2)
+        # apply mask
+        sq = sq[mask]
+        # reshape per batch
+        B = pred_depth.size(0)
+        if B > 1:
+            # compute rmse per batch
+            rmse = []
+            idx = 0
+            for b in range(B):
+                num = mask[b].sum()
+                se = sq[idx: idx + num].sum()
+                rmse.append(torch.sqrt(se / num))
+                idx += num
+            return torch.stack(rmse)
+        else:
+            # single sample
+            mse = sq.mean()
+            return torch.sqrt(mse)
+
+
+    def update(self, original_flow, attacked_flow, gt_flow=None, target_flow=None, inverse_flow=None, valid=None, tracked_flows=None, original_depth=None, attacked_depth=None, target_depth=None, tracked_depths=None):
         """Update metrics for the current batch."""
         aee_attack = self.compute_aee(original_flow, attacked_flow)
         aee_attack_target = self.compute_aee(
@@ -127,6 +175,15 @@ class AttackMetricsTracker:
         diff_error = aee_attacked_gt - aee_gt if gt_flow is not None else 0.0
         rec_error = self.compute_reconstruction_error(
             original_flow, inverse_flow) if inverse_flow is not None else 0.0
+
+
+        if original_depth is not None and attacked_depth is not None:
+            mde_rmse_attack = self.compute_rmse(original_depth, attacked_depth)
+            self.cumulative_metrics["mde_rmse_init_attack"] += mde_rmse_attack
+            mlflow.log_metric("mde_rmse_init_attack", mde_rmse_attack, step=self.count)
+            mde_rmse_attack_target = self.compute_aee(attacked_depth, target_depth)
+            self.cumulative_metrics["mde_rmse_target_attack"] += mde_rmse_attack_target
+            mlflow.log_metric("mde_rmse_target_attack", mde_rmse_attack_target, step=self.count)
 
         # Update cumulative metrics
         self.cumulative_metrics["aee_init_attack"] += aee_attack
@@ -190,6 +247,18 @@ class AttackMetricsTracker:
                 self.cumulative_metrics[f"reconstruction_error_step_{step}"] += rec_error
                 self.cumulative_metrics[f"aee_target_attack_step_{step}"] += aee_attack_target
 
+
+                # mde
+                if tracked_depths is not None:
+                    attacked_depth = tracked_depths[step]
+                    mde_rmse_attack = self.compute_rmse(original_depth, attacked_depth)
+                    mlflow.log_metric( f"mde_rmse_init_attack_step_{step}", mde_rmse_attack, step=self.count)
+                    self.cumulative_metrics[f"mde_rmse_init_attack_step_{step}"] += mde_rmse_attack
+                    
+                    mde_rmse_attack_target = self.compute_aee(attacked_depth, target_depth)
+                    self.cumulative_metrics[f"mde_rmse_target_attack_step_{step}"] += mde_rmse_attack_target
+                    mlflow.log_metric(f"mde_rmse_target_attack_step_{step}", mde_rmse_attack_target, step=self.count)
+                    
         self.save_mean_metrics(step=self.count)
     def get_mean_metrics(self):
         """
@@ -233,7 +302,7 @@ class AttackMetricsTracker:
             image = (image * 255).astype(np.uint8)
         return cv2.imwrite(filename, image)
 
-    def save_artifact(self, artifact, name, artifact_type: Literal["image", "flow", "tensor"] = "image"):
+    def save_artifact(self, artifact, name, artifact_type: Literal["image", "flow", "tensor", "depth"] = "image"):
         """
         Save an artifact (e.g., flow tensor, image, attack noise) and log it with mlflow.
         Args:
@@ -254,6 +323,9 @@ class AttackMetricsTracker:
             np.save(artifact_path, artifact)
         elif artifact_type == 'flow':
             quickvis_flow(artifact, artifact_path)
+        elif artifact_type == 'depth':
+            # print(artifact.shape)
+            save_depth(artifact, artifact_path)
         mlflow.log_artifact(artifact_path)
         # print(f"Artifact saved to {artifact_path}")
 

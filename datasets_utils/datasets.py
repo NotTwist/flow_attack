@@ -22,7 +22,8 @@ class FlowDataset(data.Dataset):
         self.enforce_dimensions = False
         self.image_x_dim = 0
         self.image_y_dim = 0
-
+        self.has_depth = False
+        self.depth_list = []
     def __getitem__(self, index):
 
         if not self.init_seed:
@@ -62,7 +63,6 @@ class FlowDataset(data.Dataset):
                 valid = torch.from_numpy(valid)
             else:
                 valid = (flow[0].abs() < 1000) & (flow[1].abs() < 1000)
-
         else:
             (img_x, img_y, img_chann) = imgs[0].shape
 
@@ -71,7 +71,13 @@ class FlowDataset(data.Dataset):
             valid = False
 
             flow = torch.from_numpy(flow).permute(2, 0, 1).float()
-
+            
+        if self.has_depth:
+            if self.sparse:
+                disp, _ = frame_utils.readDispKITTI(self.depth_list[index])
+            else:
+                disp = None
+                
         for i in range(self.frames):
             imgs[i] = torch.from_numpy(imgs[i]).permute(2, 0, 1)
 
@@ -90,7 +96,7 @@ class FlowDataset(data.Dataset):
             if self.has_gt:
                 valid = F.pad(valid, (0, diff_y, 0, diff_x), "constant", False)
 
-        return torch.stack(imgs, dim=0) / 255., flow, valid
+        return torch.stack(imgs, dim=0) / 255., flow, valid, disp
 
     def __rmul__(self, v):
         self.flow_list = v * self.flow_list
@@ -102,7 +108,9 @@ class FlowDataset(data.Dataset):
 
     def has_groundtruth(self):
         return self.has_gt
-
+    
+    def has_depth(self):
+        return self.has_depth
 
 class MpiSintel(FlowDataset):
     def __init__(self, aug_params=None, split='training', root=None, dstype='clean', has_gt=False, frames=2):
@@ -134,7 +142,7 @@ class MpiSintel(FlowDataset):
 class KITTI(FlowDataset):
     def __init__(self, aug_params=None, split='training', root=None, has_gt=False, frames=2):
         super(KITTI, self).__init__(aug_params, sparse=True)
-
+        self.has_depth = True
         self.has_gt = has_gt
         self.frames = frames
         root = osp.join(root, split)
@@ -148,7 +156,8 @@ class KITTI(FlowDataset):
 
         if self.has_gt:
             self.flow_list = sorted(glob(osp.join(root, 'flow_occ/*_10.png')))
-
+        if self.has_depth:
+            self.depth_list = sorted(glob(osp.join(root, 'disp_occ_0/*_10.png')))
         self.enforce_dimensions = True
         self.image_x_dim = 375
         self.image_y_dim = 1242

@@ -220,3 +220,11 @@ def replace_images_dic(
     output_dic["images"] = images.unsqueeze(0)
 
     return output_dic
+
+def save_depth(artifact, artifact_path):
+    depth = artifact.squeeze(0,1).cpu().numpy()  # → [518, 1722]
+    min_v, max_v = depth.min(), depth.max()
+    depth = (depth - min_v) / (max_v - min_v)
+    depth = (depth * 255).clip(0, 255).astype('uint8')
+    img = Image.fromarray(depth)  
+    img.save(artifact_path)

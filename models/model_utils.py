@@ -2,8 +2,10 @@ import torch
 import yaml
 import os
 from argparse import Namespace
-
-
+from transformers import AutoImageProcessor, AutoModelForDepthEstimation
+from PIL import Image
+import torchvision.transforms.functional as TF
+import torch.nn.functional as F
 def get_config_path(config_name="models.yaml"):
     """Returns the absolute path to the configuration file located in the configs folder."""
     # Get the root directory of the project (one level up from 'models')
@@ -377,3 +379,115 @@ def model_takes_unit_input(model):
     if model in ["PWCNet", "SpyNet"]:
         model_takes_unit_input = True
     return model_takes_unit_input
+
+
+
+class MDEModel(torch.nn.Module):
+    def __init__(self,
+                 checkpoint: str = "depth-anything/Depth-Anything-V2-Large-hf",
+                 device: torch.device = None):
+        super().__init__()
+        self.device = device or (torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu"))
+        print(f"Loading depth model on {self.device}")
+        self.processor = AutoImageProcessor.from_pretrained(checkpoint, use_fast=True)
+        self.model = AutoModelForDepthEstimation.from_pretrained(checkpoint).to(self.device)
+        self.model.eval()
+        for p in self.model.parameters():
+            p.requires_grad = False
+
+    def _to_pil_list(self, images):
+        # Accept PIL.Image, single tensor or list/tuple
+        pil_list = []
+        if isinstance(images, (list, tuple)):
+            for im in images:
+                pil_list.append(self._to_pil(im))
+        else:
+            pil_list.append(self._to_pil(images))
+        return pil_list
+
+    def _to_pil(self, img):
+        # Handle dict input with 'images' tensor [B,2,C,H,W]
+        if isinstance(img, dict) and 'images' in img:
+            tensor = img['images']
+            # select first batch and first frame
+            tensor = tensor[0, 0]  # shape [C,H,W]
+            return TF.to_pil_image(tensor.cpu())
+        if isinstance(img, Image.Image):
+            return img
+        if isinstance(img, torch.Tensor):
+            return TF.to_pil_image(img.cpu())
+        raise ValueError(f"Unsupported image type: {type(img)}")
+
+    def forward(self, images):
+        """
+        images: PIL.Image, torch.Tensor (C,H,W) or (B,C,H,W), or list of those
+        returns: torch.Tensor of shape (B, 1, H', W')
+        """
+        # Normalize input list
+        # if isinstance(images, torch.Tensor) and images.ndim == 4:
+        #     # batch tensor
+        #     tensor_list = [img for img in images]
+        #     pil_images = self._to_pil_list(tensor_list)
+        # else:
+        #     pil_images = self._to_pil_list(images)
+
+        # prepare inputs
+        # inputs = self.processor(images=images, return_tensors="pt").to(self.device)
+        # outputs = self.model(**inputs)
+        # processed = self.processor.post_process_depth_estimation(
+        #     outputs,
+        #     target_sizes=[(img.height, img.width) for img in images]
+        # )
+        # pil_depths = []
+        # for item in processed:
+        #     depth_map = item["predicted_depth"] # torch.Tensor [1,H,W]
+        #     print("outputs.requires_grad:", depth_map.requires_grad)
+        #     depth_map = normalize_depth_tensor(depth_map.squeeze())
+        #     pil_depths.append(depth_map)
+        # # print(len(pil_depths))
+        # return pil_depths if len(pil_depths) > 1 else pil_depths[0]
+        if isinstance(images, dict) and 'images' in images:
+            tensor = images['images']
+            # select first batch and first frame
+            tensor = tensor[0, 0]  # shape [C,H,W]
+
+        # proc = self.processor(images=tensor, return_tensors="pt")
+        # pixel_values = proc.pixel_values.to(self.device)
+
+        # 2) Инференс без no_grad()
+        mean = torch.tensor(self.processor.image_mean).view(1,-1,1,1).to(tensor.device)
+        std  = torch.tensor(self.processor.image_std).view(1,-1,1,1).to(tensor.device)
+        px = (tensor - mean) / std
+        outputs = self.model(pixel_values = px)
+        # print(outputs.predicted_depth.min(), outputs.predicted_depth.max())
+        # 3) Пост‑процессинг в PyTorch
+        depth_logits = outputs.predicted_depth.unsqueeze(1)  # [B,1,H',W']
+        
+        depth_map = F.interpolate(
+            depth_logits, size=(375, 1242), mode="bicubic", align_corners=False
+        )
+        # простая нормализация (ваша normalize_depth_tensor сейчас на CPU)
+
+
+        return depth_map  # GPU‑тензор с grad_fn
+
+
+def normalize_depth_tensor(depth_tensor):
+    # Normalize to [0,1]
+    min_val = depth_tensor.min()
+    max_val = depth_tensor.max()
+    return (depth_tensor - min_val) / (max_val - min_val)
+
+
+MDE_MODEL_CHECKPOINTS = {
+    'depth-anything-v2': "depth-anything/Depth-Anything-V2-Large-hf",
+    'marigold': "Intel/marigold-depth-estimation"
+}
+
+def load_mde_model(model_name: str = "depth-anything-v2", device=None) -> MDEModel:
+    """Factory function to load the depth estimation wrapper."""
+    if model_name not in MDE_MODEL_CHECKPOINTS:
+        raise ValueError(f"Unknown model name '{model_name}'. Choose from: {list(MDE_MODEL_CHECKPOINTS.keys())}")
+
+    checkpoint = MDE_MODEL_CHECKPOINTS[model_name]
+    return MDEModel(checkpoint=checkpoint, device=device)

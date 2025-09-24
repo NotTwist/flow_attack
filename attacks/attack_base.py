@@ -1,7 +1,7 @@
 import torch
 import abc
-from utils.targets import get_target
-from utils.losses import get_loss
+from utils.targets import get_target, get_mde_target
+from utils.losses import get_loss, get_mde_loss
 import sys
 class OpticalFlowAttack(abc.ABC):
     """
@@ -10,7 +10,7 @@ class OpticalFlowAttack(abc.ABC):
     This class provides a common interface for both non-learned (e.g. FGSM) and learned attacks.
     """
 
-    def __init__(self, model, epsilon=0.03, alpha=0.01, device=None, learned=False, target='neg_flow', loss='aee'):
+    def __init__(self, model, epsilon=0.03, alpha=0.01, device=None, learned=False, target='neg_flow', loss='aee', mde_model=None, mde_target='zero'):
         """
         Args:
             model (torch.nn.Module): Optical flow model to attack.
@@ -19,13 +19,17 @@ class OpticalFlowAttack(abc.ABC):
             learned (bool): If True, indicates the attack has learnable parameters.
         """
         self.model = model.to(device)
+        if mde_model is not None:
+            self.mde_model = mde_model
         self.epsilon = epsilon
         self.alpha = alpha
         self.device = device if device else torch.device(
             "cuda" if torch.cuda.is_available() else "cpu")
         self.learned = learned
         self.target = get_target(target) # TODO
-        self.loss = get_loss(loss)  # TODO
+        self.loss = get_loss(loss, untargeted= target=='untargeted')  # TODO
+        self.mde_target = get_mde_target(mde_target)
+        self.mde_loss = get_mde_loss(loss, untargeted= mde_target=='untargeted')
         self.model.eval()  # set model to evaluation mode
 
     @abc.abstractmethod

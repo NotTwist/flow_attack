@@ -1,5 +1,12 @@
 import torch
+import torch.nn.functional as F
+import re
+from typing import Union, List, Tuple, Callable, Dict
+from functools import wraps
 
+EPS = 1e-8
+
+FLOAT_RE = re.compile(r"[-+]?\d*\.?\d+(?:[eE][-+]?\d+)?")
 
 def epe(flow1, flow2):
 
@@ -48,8 +55,100 @@ def avg_epe(flow1, flow2, mask=None):
             flow1.size()) + " and " + str(flow1.size()))
     return epe
 
+import matplotlib.pyplot as plt
+from PIL import Image
+import torchvision.transforms.functional as TF
 
-def mse(flow1, flow2):
+def save_heatmap(tensor, filename='focal_weight_heatmap.png'):
+    # Detach and move to CPU
+    heatmap = tensor.detach().cpu()
+    
+    # If batch exists, take first element
+    if heatmap.ndim == 3:
+        heatmap = heatmap[0]
+    
+    # Normalize to [0, 1]
+    heatmap -= heatmap.min()
+    heatmap /= heatmap.max() + 1e-8
+
+    # Convert to numpy
+    heatmap_np = heatmap.numpy()
+
+    # Save heatmap
+    plt.imsave(filename, heatmap_np, cmap='magma')  # Or 'viridis', 'hot', etc.
+
+
+def focal_epe(flow1, flow2, gamma=1, eps=1e-1, mask=None):
+    """
+    Focal Endpoint Error (Focal-EPE) loss.
+    Down-weights pixels with large flow error to focus on hard (low-error) pixels.
+
+    Args:
+        flow1 (tensor): Predicted flow [2, H, W] or [B, 2, H, W]
+        flow2 (tensor): Ground-truth flow [2, H, W] or [B, 2, H, W]
+        gamma (float): Focusing parameter, e.g., 2.0
+        eps (float): Small constant to avoid division by zero
+        mask (tensor, optional): Binary mask to specify valid pixels
+
+    Returns:
+        float: Scalar focal EPE loss
+    """
+    d = epe(flow1, flow2)  # [H,W] or [B,H,W]
+    if mask is not None:
+        m = mask
+        if mask.dim() == 4 and d.dim() == 3:
+            m = mask.squeeze(1)
+        m = (m == 1).float()
+    else:
+        m = None
+
+    # focal weight: (1 - d/(d+eps))^gamma  (clamped >=0)
+    weight = (1.0 - d / (d + eps)).clamp(min=0.0) ** gamma
+    out = weight * d
+    if m is not None:
+        denom = m.sum().clamp_min(EPS)
+        return (out * m).sum() / denom
+    else:
+        return out.mean()
+
+def charbonnier_epe(flow1, flow2, epsilon=1e-3, alpha=0.45, mask=None):
+    """
+    Charbonnier applied to d (||diff||), возвращает скаляр в пикселях^(alpha) —
+    но поскольку alpha < 1, величины остаются в сравнимом масштабе с EPE.
+    (Если хотите строгие пиксельные единицы — используйте alpha ~ 1).
+    """
+    d = epe(flow1, flow2)
+    if mask is not None:
+        m = mask
+        if mask.dim() == 4 and d.dim() == 3:
+            m = mask.squeeze(1)
+        m = (m == 1).float()
+        out = (d + epsilon).pow(alpha)
+        denom = m.sum().clamp_min(EPS)
+        return (out * m).sum() / denom
+    else:
+        return (d + epsilon).pow(alpha).mean()
+
+
+def huber_epe(flow1, flow2, delta=1.0, mask=None):
+    """
+    Huber (on d) — работает в пикселях. Возвращает скаляр.
+    delta — переход в тех же единицах пикселей.
+    """
+    d = epe(flow1, flow2)
+    hub = torch.where(d <= delta, 0.5 * d ** 2, delta * (d - 0.5 * delta))
+    if mask is not None:
+        m = mask
+        if mask.dim() == 4 and d.dim() == 3:
+            m = mask.squeeze(1)
+        m = (m == 1).float()
+        denom = m.sum().clamp_min(EPS)
+        return (hub * m).sum() / denom
+    else:
+        return hub.mean()
+
+
+def mse(flow1, flow2, mask=None):
     """Computes mean squared error between two flow fields.
 
     Args:
@@ -63,8 +162,39 @@ def mse(flow1, flow2):
     """
     return (flow1 - flow2)**2
 
+def rmse(flow1, flow2, mask=None):
+    """
+    RMSE: sqrt(mean(||flow1-flow2||^2)).
+    Это переводит MSE (пиксели^2) в пиксели.
+    Возвращает скаляр.
+    """
+    diff_squared = (flow1 - flow2) ** 2
+    if mask is not None:
+        m = mask
+        if mask.dim() == 4 and diff_squared.dim() == 3:
+            m = mask.squeeze(1)
+        m = (m == 1).float()
+        # суммируем по всем осям кроме batch
+        if diff_squared.dim() == 3:
+            # [2,H,W] -> sum over channel -> [H,W]
+            d2 = torch.sum(diff_squared, dim=0)
+            denom = m.sum().clamp_min(EPS)
+            return torch.sqrt(torch.sum(d2 * m) / denom)
+        else:
+            # [B,2,H,W] -> sum over channel -> [B,H,W]
+            d2 = torch.sum(diff_squared, dim=1)
+            denom = m.sum().clamp_min(EPS)
+            return torch.sqrt(torch.sum(d2 * m) / denom)
+    else:
+        # no mask: mean then sqrt
+        if diff_squared.dim() == 3:
+            d2 = torch.sum(diff_squared, dim=0)  # [H,W]
+            return torch.sqrt(torch.mean(d2))
+        else:
+            d2 = torch.sum(diff_squared, dim=1)  # [B,H,W]
+            return torch.sqrt(torch.mean(d2))
 
-def avg_mse(flow1, flow2):
+def avg_mse(flow1, flow2, mask=None):
     """Computes mean squared error between two flow fields.
 
     Args:
@@ -94,7 +224,7 @@ def f_epe(pred, target, mask=None):
     return avg_epe(pred, target, mask)
 
 
-def f_mse(pred, target):
+def f_mse(pred, target, mask=None):
     """Wrapper function to compute the mean squared error between prediction and target
 
     Args:
@@ -106,10 +236,10 @@ def f_mse(pred, target):
     Returns:
         float: scalar average squared end-point-error
     """
-    return avg_mse(pred, target)
+    return rmse(pred, target, mask)
 
 
-def f_cosim(pred, target):
+def f_cosim(pred, target, mask=None):
     """Compute the mean cosine similarity between the two flow fields prediction and target
 
     Args:
@@ -180,40 +310,308 @@ def two_norm_avg(x):
     return two_norm / sqrt_numels
 
 
-def get_loss(f_type, mask=None):
-    """Wrapper to return a specified loss metric. 
-
-    Args:
-        f_type (str):
-            specifies the returned metric. Options: [aee | mse | cosim]
-        pred (tensor):
-            predicted flow field (must have same dimensions as target)
-        target (tensor):
-            specified target flow field (must have same dimensions as prediction)
-
-    Raises:
-		NotImplementedError: Unknown metric.
-
-    Returns:
-        float: scalar representing the loss measured with the specified norm
+def parse_loss_specs(specs: Union[str, List[str]]) -> List[Tuple[str, float]]:
     """
-
-    similarity_term = None
-
-    if f_type == "aee":
-        similarity_term = f_epe
-    elif f_type == "cosim":
-        similarity_term = f_cosim
-    elif f_type == "mse":
-        similarity_term = f_mse
-    elif f_type == 'epe':
-        similarity_term = epe
+    Parse CLI loss specs.
+    Accepts:
+      "aee" -> [("aee",1.0)]
+      "aee:1.0,mse:0.5" -> [("aee",1.0),("mse",0.5)]
+      ["aee:1.0","mse:0.5"] -> same
+    Returns list of (name, weight).
+    """
+    if isinstance(specs, list):
+        s = ",".join(specs)
     else:
-        raise (NotImplementedError,
-               "The requested loss type %s does not exist. Please choose one of 'aee', 'mse' or 'cosim'" % (f_type))
+        s = str(specs or "")
 
-    return similarity_term
+    s = s.replace(" ", "")
+    if s == "":
+        return []
 
+    parts = [p for p in re.split(r"[,;]+", s) if p]
+    out = []
+    for p in parts:
+        if ":" in p:
+            name, w = p.split(":", 1)
+            try:
+                w = float(w)
+            except ValueError:
+                raise ValueError(f"Invalid weight in loss spec '{p}'")
+        else:
+            name = p
+            w = 1.0
+        if not name:
+            raise ValueError(f"Empty loss name in spec '{p}'")
+        out.append((name, float(w)))
+    return out
+
+
+# def get_loss(f_type, mask=None):
+#     """Wrapper to return a specified loss metric. 
+
+#     Args:
+#         f_type (str):
+#             specifies the returned metric. Options: [aee | mse | cosim]
+#         pred (tensor):
+#             predicted flow field (must have same dimensions as target)
+#         target (tensor):
+#             specified target flow field (must have same dimensions as prediction)
+
+#     Raises:
+# 		NotImplementedError: Unknown metric.
+
+#     Returns:
+#         float: scalar representing the loss measured with the specified norm
+#     """
+
+#     similarity_term = None
+
+#     if f_type == "aee":
+#         similarity_term = f_epe
+#     elif f_type == "cosim":
+#         similarity_term = f_cosim
+#     elif f_type == "mse":
+#         similarity_term = f_mse
+#     elif f_type == 'epe':
+#         similarity_term = epe
+#     elif f_type == 'focal':
+#         similarity_term = focal_epe
+#     elif f_type == 'huber':
+#         similarity_term = huber_epe
+#     elif f_type == 'charbonnier':
+#         similarity_term = charbonnier_epe
+#     else:
+#         raise (NotImplementedError,
+#                "The requested loss type %s does not exist. Please choose one of 'aee', 'mse' or 'cosim'" % (f_type))
+
+#     return similarity_term
+
+def get_loss(f_type: Union[str, List[str]], mask=None, normalize: bool = False, untargeted: bool = False) -> Callable:
+    """
+    Return a callable loss(pred, target, **kwargs) that computes the (weighted) combination
+    of losses specified by `f_type`.
+
+    f_type may be:
+      - a single name: "aee"
+      - a spec string: "aee:1.0,mse:0.5"
+      - a list of specs: ["aee:1.0", "mse:0.5"]
+
+    normalize: if True, weights are normalized to sum to 1 before combining.
+    untargeted: if True, the final returned loss will be negated (i.e. multiplied by -1).
+
+    The returned callable signature:
+        loss_val = loss_fn(pred, target, mask_override=None, **kwargs)
+    If mask_override is provided it will override the mask passed to get_loss.
+    """
+    # Map CLI names to actual loss-callables in your code.
+    loss_fn_map = {
+        "aee": f_epe,
+        "cosim": f_cosim,
+        "mse": f_mse,
+        "epe": epe,
+        "focal": focal_epe,
+        "huber": huber_epe,
+        "charbonnier": charbonnier_epe,
+    }
+
+    # Parse f_type to list of (name, weight)
+    specs = parse_loss_specs(f_type)  # assume parse_loss_specs returns List[Tuple[str,float]]
+    if not specs:
+        raise ValueError("No loss specs provided to get_loss()")
+
+    # Validate and collect functions as tuples (fn, weight, name)
+    collected = []
+    for name, w in specs:
+        if name not in loss_fn_map:
+            raise KeyError(
+                f"Requested loss '{name}' is not available. "
+                f"Available: {', '.join(sorted(loss_fn_map.keys()))}"
+            )
+        if w < 0:
+            raise ValueError(f"Weight for loss '{name}' must be non-negative (got {w})")
+        collected.append((loss_fn_map[name], float(w), name))
+
+    # Normalize weights if requested
+    total_w = sum(w for _, w, _ in collected)
+    if normalize and total_w > 0:
+        collected = [(fn, w / total_w, name) for fn, w, name in collected]
+
+    def combined_loss(pred, target, mask_override=None, **kwargs):
+        """
+        Compute weighted sum of the configured losses.
+        mask_override takes precedence over the mask provided when get_loss() was called.
+        Extra kwargs are forwarded to individual loss functions if they accept them.
+        """
+        used_mask = mask_override if (mask_override is not None) else mask
+
+        # Start from zero (works with numpy/scalars and torch tensors)
+        total = 0
+        for fn, w, name in collected:
+            val = fn(pred, target, mask=used_mask, **kwargs)
+            total = total + (val * w)
+
+        # If untargeted mode, invert the loss sign
+        if untargeted:
+            return -total
+        return total
+
+    # attach metadata for debugging/inspection
+    combined_loss.specs = [(name, w) for _, w, name in collected]  # list of (name, weight)
+    combined_loss.component_fns = {name: fn for fn, _, name in collected}
+    combined_loss.untargeted = bool(untargeted)
+
+    return combined_loss
+
+# def get_loss(f_type: Union[str, List[str]], mask=None, normalize: bool = False, normalize_components_by_running_avg: bool = True, untargeted: bool = False, running_avg_eps: float = 1e-6) -> Callable:
+#     """
+#     Return a callable loss(pred, target, **kwargs) that computes the (weighted) combination
+#     of losses specified by `f_type`.
+
+#     f_type may be:
+#       - a single name: "aee"
+#       - a spec string: "aee:1.0,mse:0.5"
+#       - a list of specs: ["aee:1.0", "mse:0.5"]
+
+#     normalize: if True, weights are normalized to sum to 1 before combining.
+#     untargeted: if True, the final returned loss will be negated (i.e. multiplied by -1).
+
+#     The returned callable signature:
+#         loss_val = loss_fn(pred, target, mask_override=None, **kwargs)
+#     If mask_override is provided it will override the mask passed to get_loss.
+#     """
+#     # Map CLI names to actual loss-callables in your code.
+#     loss_fn_map = {
+#         "aee": f_epe,
+#         "cosim": f_cosim,
+#         "mse": f_mse,
+#         "epe": epe,
+#         "focal": focal_epe,
+#         "huber": huber_epe,
+#         "charbonnier": charbonnier_epe,
+#     }
+
+#     # Parse f_type to list of (name, weight)
+#     specs = parse_loss_specs(f_type)  # assume parse_loss_specs returns List[Tuple[str,float]]
+#     if not specs:
+#         raise ValueError("No loss specs provided to get_loss()")
+
+#     # Validate and collect functions as tuples (fn, weight, name)
+#     collected = []
+#     for name, w in specs:
+#         if name not in loss_fn_map:
+#             raise KeyError(
+#                 f"Requested loss '{name}' is not available. "
+#                 f"Available: {', '.join(sorted(loss_fn_map.keys()))}"
+#             )
+#         if w < 0:
+#             raise ValueError(f"Weight for loss '{name}' must be non-negative (got {w})")
+#         collected.append((loss_fn_map[name], float(w), name))
+
+#     # Normalize weights if requested
+#     total_w = sum(w for _, w, _ in collected)
+#     if normalize and total_w > 0:
+#         collected = [(fn, w / total_w, name) for fn, w, name in collected]
+
+
+#     specs_processed = [(name, w) for _, w, name in collected]
+#     component_fns: Dict[str, Callable] = {name: fn for fn, _, name in collected}
+#     original_weights = {name: float(w) for name, w in specs_processed}
+#     original_total_weight = sum(original_weights.values())
+
+#     # SIMPLE running stats stored in closure
+#     running_mean = {name: 0.0 for name in original_weights}
+#     running_count = {name: 0 for name in original_weights}
+#     eps = float(running_avg_eps)
+
+#     def _to_scalar(val):
+#         if isinstance(val, torch.Tensor):
+#             # reduce to scalar (mean if multi-element)
+#             return float(val.detach().cpu().mean().item())
+#         return float(val)
+
+#     def combined_loss(pred, target, mask_override=None, update_running: bool = True, **kwargs):
+#         used_mask = mask_override if (mask_override is not None) else mask
+
+#         # compute component tensors
+#         component_vals = {}
+#         for name, _ in specs_processed:
+#             fn = component_fns[name]
+#             v = fn(pred, target, mask=used_mask, **kwargs)
+#             # ensure tensor for autograd; if fn returned numpy/float convert to tensor on pred device
+#             if not isinstance(v, torch.Tensor):
+#                 device = pred.device if isinstance(pred, torch.Tensor) else None
+#                 v = torch.tensor(v, device=device)
+#             component_vals[name] = v
+
+#         # choose weights based on previous running means (no circular dependency)
+#         if normalize_components_by_running_avg and not all(running_count[n] == 0 for n in running_mean):
+#             inv = {n: 1.0 / (running_mean[n] + eps) for n in running_mean}
+#             scaled = {n: original_weights[n] * inv[n] for n in original_weights}
+#             sum_scaled = sum(scaled.values())
+#             if sum_scaled != 0 and original_total_weight > 0:
+#                 factor = original_total_weight / sum_scaled
+#                 weights_to_use = {n: scaled[n] * factor for n in scaled}
+#             elif sum_scaled != 0:
+#                 # if original total was zero, normalize to sum 1
+#                 weights_to_use = {n: scaled[n] / sum_scaled for n in scaled}
+#             else:
+#                 weights_to_use = original_weights.copy()
+#         else:
+#             weights_to_use = original_weights.copy()
+
+#         # build combined tensor
+#         total_tensor = None
+#         for name, val in component_vals.items():
+#             w = float(weights_to_use[name])
+#             weighted = val * w
+#             print(name, weighted)
+#             total_tensor = weighted if total_tensor is None else (total_tensor + weighted)
+#         combined = total_tensor if total_tensor is not None else torch.tensor(0.0, device=(pred.device if isinstance(pred, torch.Tensor) else None))
+
+#         if untargeted:
+#             combined = -combined
+
+#         # update running means AFTER computing combined so first call uses original weights
+#         if update_running:
+#             for name, val in component_vals.items():
+#                 scalar = _to_scalar(val)
+#                 running_count[name] += 1
+#                 n = running_count[name]
+#                 # incremental mean update
+#                 running_mean[name] = running_mean[name] + (scalar - running_mean[name]) / n
+
+#         return combined
+
+#     # attach a few helpers for inspection
+#     combined_loss.specs = [(name, w) for name, w in specs_processed]
+#     combined_loss.component_fns = component_fns
+#     combined_loss._running_mean = running_mean
+#     combined_loss._running_count = running_count
+#     combined_loss._simple_config = dict(normalize_components_by_running_avg=bool(normalize_components_by_running_avg),
+#                                         running_avg_eps=eps,
+#                                         untargeted=bool(untargeted))
+#     return combined_loss
+
+
+def f1_loss(depth, target):
+    return F.l1_loss(depth, target)
+
+def get_mde_loss(f_type=None, untargeted: bool = False) -> Callable:
+    """
+    untargeted: если True — возвращаем функцию с отрицательным знаком.
+    """
+    base_loss = f1_loss
+
+    if not untargeted:
+        return base_loss
+
+    @wraps(base_loss)
+    def neg_loss(*args, **kwargs):
+        return - base_loss(*args, **kwargs)
+
+    # optional: attach flag so caller can introspect
+    neg_loss._negated = True
+    return neg_loss 
 
 def get_loss_cospgd(f_type, pred, target):
     """Wrapper to return a specified loss metric. 

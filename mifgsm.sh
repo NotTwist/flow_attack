@@ -13,6 +13,8 @@ for epsilon in "${epsilons[@]}"; do
     --steps 40 \
     --target zero \
     --scaling_type none \
+    --dataset Sintel \
+    --small_run \
     --saved_iterations 3 5 10 15 20 25 30 35 40
 
   echo "Running MIFGSM attack with cospgd and epsilon=$epsilon"
@@ -23,6 +25,8 @@ for epsilon in "${epsilons[@]}"; do
     --steps 40 \
     --target zero \
     --scaling_type cospgd \
+    --dataset Sintel \
+    --small_run \
     --saved_iterations 3 5 10 15 20 25 30 35 40
 
   echo "Running MIFGSM attack with sobel and epsilon=$epsilon"
@@ -33,6 +37,8 @@ for epsilon in "${epsilons[@]}"; do
     --steps 40 \
     --target zero \
     --scaling_type sobel \
+    --dataset Sintel \
+    --small_run \
     --saved_iterations 3 5 10 15 20 25 30 35 40
 
   echo "Running MIFGSM attack with highfreq and epsilon=$epsilon"
@@ -43,5 +49,7 @@ for epsilon in "${epsilons[@]}"; do
     --steps 40 \
     --target zero \
     --scaling_type high_freq \
+    --dataset Sintel \
+    --small_run \
     --saved_iterations 3 5 10 15 20 25 30 35 40
 done

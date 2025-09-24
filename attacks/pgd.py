@@ -27,7 +27,7 @@ class PGDOpticalFlowAttack(OpticalFlowAttack):
         self.save_iterations = save_iterations
 
     def attack(self, inputs: Dict[str, torch.Tensor]):
-        """
+        """        
         Generates adversarial images using PGD.
 
         Args:
@@ -38,16 +38,19 @@ class PGDOpticalFlowAttack(OpticalFlowAttack):
         """
         orig_images = get_image_tensors(inputs, clone=True)
 
+        orig_inputs = replace_images_dic(inputs, orig_images)
+        inputs['images'].requires_grad_(True)
+        # Compute initial flow prediction and target
+        flow_pred_orig = self.model(orig_inputs)['flows'].squeeze(0)
+        
         images = functions.init_linf(
             orig_images, epsilon=self.epsilon, clamp_min=self.image_min, clamp_max=self.image_max
         )
         inputs = replace_images_dic(inputs, images)
         inputs['images'].requires_grad_(True)
-
-        # Compute initial flow prediction and target
+        
         flow_pred = self.model(inputs)['flows'].squeeze(0)
-
-        target = self.target(flow_pred)
+        target = self.target(flow_pred_orig)
         target = target.to(self.device)
         target.requires_grad = False
 
@@ -56,6 +59,7 @@ class PGDOpticalFlowAttack(OpticalFlowAttack):
 
         for step in range(1, self.num_steps + 1):
             loss = self.loss(flow_pred, target)
+            # print(loss)
             self.model.zero_grad()
             loss.backward()
             grads = get_image_grads(inputs)

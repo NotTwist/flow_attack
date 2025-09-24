@@ -28,6 +28,22 @@ def neg_flow(flow):
 	"""
 	return - flow.detach()
 
+def untargeted_flow(flow):
+    return flow.detach()
+
+def zero_depth(depth):
+    return torch.zeros_like(depth)
+
+def untargeted_depth(depth):
+    return depth.detach()
+
+def get_mde_target(target_name='zero'):
+	if target_name == 'zero':
+		target = zero_depth
+	if target_name == 'untargeted':
+		target = untargeted_depth
+	return target
+
 def get_target(target_name, custom_target_path="", device=None):
 	"""Getter method which yields a specified target flow used during PCFA 
 
@@ -51,7 +67,7 @@ def get_target(target_name, custom_target_path="", device=None):
 	elif target_name == 'neg_flow':
 		target = neg_flow
 	elif target_name == 'untargeted':
-		target = flow_gt
+		target = untargeted_flow
 	else:
 		raise ValueError('The specified target type "' + target_name +
 		                 '" is not defined and cannot be used. Select one of "zero", "neg_flow" or "custom". Aborting.')

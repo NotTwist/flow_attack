@@ -73,7 +73,6 @@ class ScaledLossOpticalFlowAttack(OpticalFlowAttack):
         elif self.scaling_type == 'low_freq':
             pass
         raw_loss = self.loss(flow_pred, target)
-        print(raw_loss.shape)
         if raw_loss.dim() == 4 and raw_loss.size(1) != mask.size(1):
             mask = mask.expand(-1, raw_loss.size(1), -1, -1)
 

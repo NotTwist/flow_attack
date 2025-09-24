@@ -12,7 +12,6 @@ for epsilon in "${epsilons[@]}"; do
     --epsilon $(bc <<< "scale=5; $epsilon") \
     --steps 40 \
     --target zero \
-    --small_run \
     --saved_iterations 3 5 10 15 20 25 30 35 40
 
   echo "Running PIFGSM attack with epsilon=$epsilon"
@@ -22,7 +21,6 @@ for epsilon in "${epsilons[@]}"; do
     --epsilon $(bc <<< "scale=5; $epsilon") \
     --steps 40 \
     --target zero \
-    --small_run \
     --saved_iterations 3 5 10 15 20 25 30 35 40
 
   echo "Running EMIFGSM attack with epsilon=$epsilon"
@@ -32,7 +30,6 @@ for epsilon in "${epsilons[@]}"; do
     --epsilon $(bc <<< "scale=5; $epsilon") \
     --steps 40 \
     --target zero \
-    --small_run \
     --saved_iterations 3 5 10 15 20 25 30 35 40
 
   echo "Running VMIFGSM attack with epsilon=$epsilon"
@@ -42,7 +39,6 @@ for epsilon in "${epsilons[@]}"; do
     --epsilon $(bc <<< "scale=5; $epsilon") \
     --steps 40 \
     --target zero \
-    --small_run \
     --saved_iterations 3 5 10 15 20 25 30 35 40
 
   echo "Running VNIFGSM attack with epsilon=$epsilon"
@@ -52,6 +48,5 @@ for epsilon in "${epsilons[@]}"; do
     --epsilon $(bc <<< "scale=5; $epsilon") \
     --steps 40 \
     --target zero \
-    --small_run \
     --saved_iterations 3 5 10 15 20 25 30 35 40
 done
