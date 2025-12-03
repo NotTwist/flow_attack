@@ -1,7 +1,7 @@
 import torch
 import abc
-from utils.targets import get_target, get_mde_target
-from utils.losses import get_loss, get_mde_loss
+from utils.targets import get_target, get_mde_target, get_ss_target
+from utils.losses import get_loss, get_mde_loss, get_ss_loss
 import sys
 class OpticalFlowAttack(abc.ABC):
     """
@@ -10,7 +10,7 @@ class OpticalFlowAttack(abc.ABC):
     This class provides a common interface for both non-learned (e.g. FGSM) and learned attacks.
     """
 
-    def __init__(self, model, epsilon=0.03, alpha=0.01, device=None, learned=False, target='neg_flow', loss='aee', mde_model=None, mde_target='zero'):
+    def __init__(self, model, epsilon=0.03, alpha=0.01, device=None, learned=False, target='neg_flow', loss='aee', mde_model=None, mde_target='zero', ss_model=None, ss_target='untargeted'):
         """
         Args:
             model (torch.nn.Module): Optical flow model to attack.
@@ -19,8 +19,16 @@ class OpticalFlowAttack(abc.ABC):
             learned (bool): If True, indicates the attack has learnable parameters.
         """
         self.model = model.to(device)
+        self.use_mde = False
         if mde_model is not None:
             self.mde_model = mde_model
+            self.mde_model.eval()
+            self.use_mde = True
+        self.use_ss = False
+        if ss_model is not None:
+            self.ss_model = ss_model
+            self.ss_model.eval()
+            self.use_ss = True
         self.epsilon = epsilon
         self.alpha = alpha
         self.device = device if device else torch.device(
@@ -28,8 +36,10 @@ class OpticalFlowAttack(abc.ABC):
         self.learned = learned
         self.target = get_target(target) # TODO
         self.loss = get_loss(loss, untargeted= target=='untargeted')  # TODO
-        self.mde_target = get_mde_target(mde_target)
+        self.mde_target = mde_target
         self.mde_loss = get_mde_loss(loss, untargeted= mde_target=='untargeted')
+        self.ss_target = get_ss_target(ss_target)
+        self.ss_loss = get_ss_loss(untargeted=ss_target == 'untargeted')
         self.model.eval()  # set model to evaluation mode
 
     @abc.abstractmethod

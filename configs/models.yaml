@@ -60,3 +60,23 @@ models:
       seq_dir: 'default'
       vis_dir: 'default'
     weights_path: "/home/28s_mur@lab.graphicon.ru/flow_benchmark/PCFA/models/MemFlow/ckpts/MemFlowNet_sintel.pth"
+  deeplabv3:
+    framework: torchvision
+    type: deeplabv3
+    backbone: resnet101           # optional, only for clarity
+    weights: "default"            # reserved for future custom path
+  pspnet_cityscapes:
+    framework: mmseg
+    type: pspnet
+    config: "/home/28s_mur@lab.graphicon.ru/flow_attack/PSPNet/pspnet_r50-d8_4xb2-40k_cityscapes-512x1024.py"
+    weights_path: "/home/28s_mur@lab.graphicon.ru/flow_attack/PSPNet/pspnet_r50-d8_512x1024_40k_cityscapes_20200605_003338-2966598c.pth"
+  segformer_cityscapes:
+    framework: mmseg
+    type: segformer
+    config: "/home/28s_mur@lab.graphicon.ru/flow_attack/SegFormer/segformer_mit-b5_8xb1-160k_cityscapes-1024x1024.py"
+    weights_path: "/home/28s_mur@lab.graphicon.ru/flow_attack/SegFormer/segformer_mit-b5_8x1_1024x1024_160k_cityscapes_20211206_072934-87a052ec.pth"
+  mask2former_cityscapes:
+    framework: mmseg
+    type: mask2former
+    config: "/home/28s_mur@lab.graphicon.ru/flow_attack/Mask2Former/mask2former_swin-l-in22k-384x384-pre_8xb2-90k_cityscapes-512x1024.py"
+    weights_path: "/home/28s_mur@lab.graphicon.ru/flow_attack/Mask2Former/mask2former_swin-l-in22k-384x384-pre_8xb2-90k_cityscapes-512x1024_20221202_141901-28ad20f1.pth"

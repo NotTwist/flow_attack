@@ -71,7 +71,7 @@ class FlowDataset(data.Dataset):
             valid = False
 
             flow = torch.from_numpy(flow).permute(2, 0, 1).float()
-            
+        disp = False
         if self.has_depth:
             if self.sparse:
                 disp, _ = frame_utils.readDispKITTI(self.depth_list[index])
@@ -140,12 +140,14 @@ class MpiSintel(FlowDataset):
 
 
 class KITTI(FlowDataset):
-    def __init__(self, aug_params=None, split='training', root=None, has_gt=False, frames=2):
+    def __init__(self, aug_params=None, split='training', root=None, has_gt=False, frames=2, has_depth=True):
         super(KITTI, self).__init__(aug_params, sparse=True)
-        self.has_depth = True
+        self.has_depth = has_depth
         self.has_gt = has_gt
         self.frames = frames
+        self.K_list = []
         root = osp.join(root, split)
+        self.root = root
         images1 = sorted(glob(osp.join(root, 'image_2/*_10.png')))
         images2 = sorted(glob(osp.join(root, 'image_2/*_11.png')))
 
@@ -153,6 +155,8 @@ class KITTI(FlowDataset):
             frame_id = img1.split('/')[-1]
             self.extra_info += [[frame_id]]
             self.image_list += [[img1, img2]]
+            K = self._make_camera_config_from_kitti(frame_id)
+            self.K_list.append(K)
 
         if self.has_gt:
             self.flow_list = sorted(glob(osp.join(root, 'flow_occ/*_10.png')))
@@ -166,6 +170,127 @@ class KITTI(FlowDataset):
             raise RuntimeWarning(
                 "No KITTI data found at dataset root '%s'. Check the configuration file under helper_functions/config_paths.py and add the correct path to the KITTI dataset." % root)
 
+
+    def _load_intrinsics_for_frame(self, frame_id, cam_id=2):
+            """
+            Load K for a single frame from its calibration file if available,
+            otherwise fallback to a common calib_cam_to_cam.txt.
+            """
+            # try per-frame calibration first
+            calib_dir = osp.join(self.root, "calib_cam_to_cam")
+            per_frame_path = osp.join(calib_dir, f"{frame_id[:-7]}.txt")
+            if osp.isfile(per_frame_path):
+                calib_path = per_frame_path
+            else:
+                # fallback: single common file
+                calib_path = osp.join(self.root, "calib_cam_to_cam.txt")
+                if not osp.isfile(calib_path):
+                    calib_path = osp.join(osp.dirname(
+                        self.root), "calib_cam_to_cam.txt")
+                if not osp.isfile(calib_path):
+                    raise FileNotFoundError(
+                        f"Calibration not found for frame {frame_id} (searched {per_frame_path} and {calib_path})"
+                    )
+
+            # parse file
+            with open(calib_path, "r") as f:
+                lines = f.readlines()
+
+            key = f"P_rect_0{cam_id}"
+            K = None
+            for line in lines:
+                if line.startswith(key):
+                    vals = [float(x) for x in line.strip().split()[1:]]
+                    P = np.array(vals, dtype=np.float32).reshape(3, 4)
+                    K = P[:, :3].copy()
+                    break
+
+            if K is None:
+                raise RuntimeError(
+                    f"Camera intrinsics {key} not found in {calib_path}")
+
+            return torch.from_numpy(K).float()
+
+
+    def _make_camera_config_from_kitti(self, frame_id: int, cam_id: int = 2) -> dict:
+        """
+            Parse KITTI calib_cam_to_cam.txt and convert intrinsics to a camera_config
+            dictionary compatible with depth_to_local_coordinates().
+
+            Args:
+                frame_id (str): frame name (e.g., '000000_10.png')
+                cam_id (int): camera ID (usually 2 for left color camera)
+
+            Returns:
+                dict: camera_config with image size, field of view, and intrinsics.
+            """
+
+        # Путь до файла калибровки (либо на кадр, либо общий)
+        calib_dir = osp.join(self.root, "calib_cam_to_cam")
+        per_frame_path = osp.join(calib_dir, f"{frame_id[:-7]}.txt")
+        if osp.isfile(per_frame_path):
+            calib_path = per_frame_path
+        else:
+            # fallback — общий файл
+            common_path = osp.join(self.root, "calib_cam_to_cam.txt")
+            if not osp.isfile(common_path):
+                common_path = osp.join(osp.dirname(
+                    self.root), "calib_cam_to_cam.txt")
+            calib_path = common_path
+
+        # --- безопасный парсер файла калибровки ---
+        calib = {}
+        import re, math
+        num_re = re.compile(r"[-+]?(?:\d+\.?\d*|\.\d+)(?:[eE][-+]?\d+)?")
+        with open(calib_path, "r") as f:
+            for line in f:
+                if ":" not in line:
+                    continue
+                key, val = line.strip().split(":", 1)
+                key = key.strip()
+                val = val.strip()
+                # извлекаем только числа
+                nums = [float(m.group(0)) for m in num_re.finditer(val)]
+                calib[key] = nums if nums else val  # строка или список чисел
+
+        # --- Intrinsics из P_rect_0{cam_id} ---
+        p_key = f"P_rect_0{cam_id}"
+        if p_key not in calib or len(calib[p_key]) != 12:
+            raise RuntimeError(
+                f"{p_key} not found or malformed in {calib_path}")
+        P = np.array(calib[p_key], dtype=np.float32).reshape(3, 4)
+        fx, fy, cx, cy = P[0, 0], P[1, 1], P[0, 2], P[1, 2]
+
+        # --- Image size ---
+        s_key = f"S_rect_0{cam_id}" if f"S_rect_0{cam_id}" in calib else f"S_0{cam_id}"
+        if s_key in calib and len(calib[s_key]) >= 2:
+            width, height = calib[s_key][:2]
+        else:
+            width, height = 1242.0, 375.0  # defaults for KITTI
+
+        # --- FOV ---
+        fov = 2.0 * math.degrees(math.atan(width / (2.0 * fx)))
+
+        # --- Extrinsics (не используется, но добавим для совместимости) ---
+        transform_matrix = np.eye(4).tolist()
+
+        camera_config = {
+            "image_width": int(width),
+            "image_height": int(height),
+            "fov": fov,
+            "transform_matrix": transform_matrix,
+            "fx": fx,
+            "fy": fy,
+            "cx": cx,
+            "cy": cy,
+        }
+
+        return camera_config
+
+    def __getitem__(self, index):
+        imgs, flow, valid, disp = super().__getitem__(index)
+        K = self.K_list[index]  # return corresponding K
+        return imgs, flow, valid, disp, K
 
 class Demo(FlowDataset):
     def __init__(self, aug_params=None, split='eval', root=None, has_gt=False, n_images=-1, frames=2):

@@ -386,24 +386,17 @@ def parse_loss_specs(specs: Union[str, List[str]]) -> List[Tuple[str, float]]:
 
 #     return similarity_term
 
-def get_loss(f_type: Union[str, List[str]], mask=None, normalize: bool = False, untargeted: bool = False) -> Callable:
+def get_loss(
+    f_type: Union[str, List[str]],
+    mask=None,
+    normalize: bool = False,
+    untargeted: bool = False
+) -> Callable:
     """
-    Return a callable loss(pred, target, **kwargs) that computes the (weighted) combination
-    of losses specified by `f_type`.
-
-    f_type may be:
-      - a single name: "aee"
-      - a spec string: "aee:1.0,mse:0.5"
-      - a list of specs: ["aee:1.0", "mse:0.5"]
-
-    normalize: if True, weights are normalized to sum to 1 before combining.
-    untargeted: if True, the final returned loss will be negated (i.e. multiplied by -1).
-
-    The returned callable signature:
-        loss_val = loss_fn(pred, target, mask_override=None, **kwargs)
-    If mask_override is provided it will override the mask passed to get_loss.
+    Возвращает функцию потерь, которая может быть комбинацией нескольких метрик.
+    При наличии mask, итоговый loss вычисляется только по пикселям внутри маски.
     """
-    # Map CLI names to actual loss-callables in your code.
+
     loss_fn_map = {
         "aee": f_epe,
         "cosim": f_cosim,
@@ -414,12 +407,10 @@ def get_loss(f_type: Union[str, List[str]], mask=None, normalize: bool = False, 
         "charbonnier": charbonnier_epe,
     }
 
-    # Parse f_type to list of (name, weight)
-    specs = parse_loss_specs(f_type)  # assume parse_loss_specs returns List[Tuple[str,float]]
+    specs = parse_loss_specs(f_type)
     if not specs:
         raise ValueError("No loss specs provided to get_loss()")
 
-    # Validate and collect functions as tuples (fn, weight, name)
     collected = []
     for name, w in specs:
         if name not in loss_fn_map:
@@ -428,35 +419,43 @@ def get_loss(f_type: Union[str, List[str]], mask=None, normalize: bool = False, 
                 f"Available: {', '.join(sorted(loss_fn_map.keys()))}"
             )
         if w < 0:
-            raise ValueError(f"Weight for loss '{name}' must be non-negative (got {w})")
+            raise ValueError(
+                f"Weight for loss '{name}' must be non-negative (got {w})")
         collected.append((loss_fn_map[name], float(w), name))
 
-    # Normalize weights if requested
     total_w = sum(w for _, w, _ in collected)
     if normalize and total_w > 0:
         collected = [(fn, w / total_w, name) for fn, w, name in collected]
 
     def combined_loss(pred, target, mask_override=None, **kwargs):
-        """
-        Compute weighted sum of the configured losses.
-        mask_override takes precedence over the mask provided when get_loss() was called.
-        Extra kwargs are forwarded to individual loss functions if they accept them.
-        """
-        used_mask = mask_override if (mask_override is not None) else mask
+        used_mask = mask_override if mask_override is not None else mask
 
-        # Start from zero (works with numpy/scalars and torch tensors)
+        if used_mask is not None:
+            # Приводим маску к нужной форме
+            m = (used_mask == 1).float()
+            if m.dim() == 4 and pred.dim() == 3:
+                m = m.squeeze(1)
+            # Применяем маску только к видимым областям
+            pred_masked = pred * m
+            target_masked = target * m
+        else:
+            pred_masked, target_masked = pred, target
+
         total = 0
         for fn, w, name in collected:
-            val = fn(pred, target, mask=used_mask, **kwargs)
+            # если функция поддерживает mask, передаем её
+            try:
+                val = fn(pred_masked, target_masked, mask=used_mask, **kwargs)
+            except TypeError:
+                # если функция не принимает mask, просто используем маскированные тензоры
+                val = fn(pred_masked, target_masked, **kwargs)
             total = total + (val * w)
 
-        # If untargeted mode, invert the loss sign
         if untargeted:
-            return -total
+            total = -total
         return total
 
-    # attach metadata for debugging/inspection
-    combined_loss.specs = [(name, w) for _, w, name in collected]  # list of (name, weight)
+    combined_loss.specs = [(name, w) for _, w, name in collected]
     combined_loss.component_fns = {name: fn for fn, _, name in collected}
     combined_loss.untargeted = bool(untargeted)
 
@@ -593,8 +592,19 @@ def get_loss(f_type: Union[str, List[str]], mask=None, normalize: bool = False, 
 #     return combined_loss
 
 
-def f1_loss(depth, target):
-    return F.l1_loss(depth, target)
+def f1_loss(depth, target, mask=None):
+    diff = (depth - target).abs()
+
+    if mask is not None:
+        mask = mask.float()
+        if mask.shape != depth.shape:
+            mask = mask.expand_as(depth)
+        diff = diff * mask
+        denom = mask.sum().clamp(min=1.0)
+    else:
+        denom = diff.numel()
+
+    return diff.sum() / denom
 
 def get_mde_loss(f_type=None, untargeted: bool = False) -> Callable:
     """
@@ -612,6 +622,52 @@ def get_mde_loss(f_type=None, untargeted: bool = False) -> Callable:
     # optional: attach flag so caller can introspect
     neg_loss._negated = True
     return neg_loss 
+
+
+# def ss_base_loss(logits, target_mask, mask=None):
+#     loss = F.cross_entropy(logits, target_mask, reduction='none')  # (B,H,W)
+
+#     if mask is not None:
+#         mask = mask.float()
+#         if mask.dim() == 4 and mask.size(1) == 1:
+#             mask = mask.squeeze(1)
+#         loss = (loss * mask).sum() / mask.sum().clamp_min(EPS)
+#     else:
+#         loss = loss.mean()
+
+#     return loss
+
+
+def ss_base_loss(logits, target, mask=None, gamma=2.0):
+    ce = F.cross_entropy(logits, target, reduction='none')
+    pt = torch.exp(-ce)
+    loss = ((1-pt)**gamma * ce)
+    if mask is not None:
+        loss = (loss * mask).sum() / mask.sum().clamp_min(1e-6)
+    else:
+        loss = loss.mean()
+    return loss
+
+
+def get_ss_loss(untargeted: bool = False) -> Callable:
+    """
+    Возвращает loss-функцию для semantic segmentation.
+    Если untargeted=True → loss будет инвертирован (используется для untargeted атак).
+    Если untargeted=False → обычный положительный loss (используется для targeted атак).
+    """
+    base_loss = ss_base_loss
+
+    if not untargeted:
+        return base_loss
+
+    @wraps(base_loss)
+    def neg_loss(*args, **kwargs):
+        # Инвертируем знак, чтобы оптимизатор "усиливал" ошибку модели.
+        return - base_loss(*args, **kwargs)
+
+    neg_loss._negated = True
+    return neg_loss
+
 
 def get_loss_cospgd(f_type, pred, target):
     """Wrapper to return a specified loss metric. 

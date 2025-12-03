@@ -12,6 +12,12 @@ datasets:
     has_gt: true
     frames: 2
 
+  Kitti15_test:
+    root: "/home/28s_mur@lab.graphicon.ru/flow_attack/datasets/kitti15"
+    split: "testing"
+    has_gt: false
+    frames: 2
+    
   demo:
     root: "/home/28s_mur@lab.graphicon.ru/flow_attack/datasets/test3"
     split: "eval"

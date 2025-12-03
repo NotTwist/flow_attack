@@ -14,8 +14,8 @@ class FGSMOpticalFlowMDEDAttack(OpticalFlowAttack):
     This is a non-learned attack.
     """
 
-    def __init__(self, model, mde_model, target: Literal['zero', 'neg_flow', 'untargeted'], mde_target: Literal['zero','untargeted'], loss_weights=None, epsilon=0.03, alpha: float = 0.01, device=None, num_steps=20, common_perturb=False, clipping=True, image_min=0, image_max=1, save_iterations: list = [], loss='aee'):
-        super().__init__(model, epsilon, alpha, device, target=target, learned=False, loss=loss, mde_model=mde_model, mde_target=mde_target)
+    def __init__(self, model, mde_model, target: Literal['zero', 'neg_flow', 'untargeted'], mde_target: Literal['zero','untargeted'], ss_model=None, ss_target="untargeted", loss_weights=None, epsilon=0.03, alpha: float = 0.01, device=None, num_steps=20, common_perturb=False, clipping=True, image_min=0, image_max=1, save_iterations: list = [], loss='aee'):
+        super().__init__(model, epsilon, alpha, device, target=target, learned=False, loss=loss, mde_model=mde_model, mde_target=mde_target, ss_model=ss_model, ss_target=ss_target)
         self.num_steps = num_steps
         self.common_perturb = common_perturb
         self.clipping = clipping
@@ -24,8 +24,10 @@ class FGSMOpticalFlowMDEDAttack(OpticalFlowAttack):
         self.save_iterations = save_iterations
         self.flow_w = 1
         self.mde_w = 0.1
+        self.ss_w = 1
         if loss_weights is not None:
-            self.flow_w, self.mde_w = loss_weights
+            self.flow_w, self.mde_w, self.ss_w = loss_weights
+            
     def attack(self, inputs: Dict[str, torch.Tensor]):
         """
         Generates adversarial images using FGSM.
@@ -44,24 +46,40 @@ class FGSMOpticalFlowMDEDAttack(OpticalFlowAttack):
         inputs['images'].requires_grad_(True)
         
         flow_pred = self.model(inputs)['flows'].squeeze(0)
-        mde_pred = self.mde_model(inputs)
-        
         target = self.target(flow_pred)
         target = target.to(self.device)
         target.requires_grad = False
-
-
-        mde_target = self.mde_target(mde_pred)
-        mde_target = mde_target.to(self.device)
-        mde_target.requires_grad = False
+        
+        if self.use_mde:
+            mde_pred = self.mde_model(inputs)
+            mde_target = self.mde_target(mde_pred)
+            mde_target = mde_target.to(self.device)
+            mde_target.requires_grad = False
+            
+        if self.use_ss:
+            ss_pred = self.ss_model(inputs, return_logits=True)
+            # print(ss_pred.shape)
+            
+            ss_target = self.ss_target(ss_pred)
+            ss_target = ss_target.to(self.device)
+            ss_target.requires_grad = False
         # Dictionary to store flow outputs at specific iterations
         tracked_flows = {}
         tracked_depths = {}
+        tracked_ss = {}
         
         for step in range(1, self.num_steps + 1):
             flow_loss = self.loss(flow_pred, target)
-            mde_loss = self.mde_loss(mde_pred, mde_target)
-            loss = mde_loss * self.mde_w + flow_loss * self.flow_w
+            
+            mde_loss = 0
+            if self.use_mde:
+                mde_loss = self.mde_loss(mde_pred, mde_target)
+            
+            ss_loss = 0
+            if self.use_ss:
+                ss_loss = self.ss_loss(ss_pred, ss_target)
+            loss = mde_loss * self.mde_w + flow_loss * self.flow_w + ss_loss * self.ss_w
+            # print(loss, flow_loss, mde_loss, ss_loss)
             # print(loss.item(), flow_loss.item(), mde_loss.item())
             # print("loss.requires_grad:", loss.requires_grad)
             # print("flow_pred.requires_grad:", flow_pred.requires_grad)
@@ -69,7 +87,11 @@ class FGSMOpticalFlowMDEDAttack(OpticalFlowAttack):
             # print("Model gradients enabled:", torch.is_grad_enabled())
 
             self.model.zero_grad()
-            self.mde_model.zero_grad()
+            if self.use_mde:
+                self.mde_model.zero_grad()
+            if self.use_ss:
+                self.ss_model.zero_grad()
+
             loss.backward()
             grads = get_image_grads(inputs)
             images = get_image_tensors(inputs)
@@ -81,17 +103,23 @@ class FGSMOpticalFlowMDEDAttack(OpticalFlowAttack):
             inputs['images'].requires_grad_(True)
             
             flow_pred = self.model(inputs)['flows'].squeeze(0)
-            mde_pred = self.mde_model(inputs)
-
+            if self.use_mde:
+                mde_pred = self.mde_model(inputs)
+            if self.use_ss:
+                ss_pred = self.ss_model(inputs, return_logits=True)
             # Store flow at specific attack steps
             if step in self.save_iterations:
                 tracked_flows[step] = flow_pred.clone().detach()
-                tracked_depths[step] = mde_pred.clone().detach()
+                if self.use_mde:
+                    tracked_depths[step] = mde_pred.clone().detach()
+                if self.use_ss:
+                    tracked_ss[step] = ss_pred.clone().detach()
 
         return {
             "final_images": inputs,
             "tracked_flows": tracked_flows,
-            "tracked_depths": tracked_depths
+            "tracked_depths": tracked_depths,
+            "tracked_ss": tracked_ss
         }
 
     def step(self, images, grads, orig_images):

@@ -121,7 +121,7 @@ def load_dataset_args(dataset_name):
 
 
 def prepare_dataloader(mode='training', dataset_name='Sintel', shuffle=False, batch_size=1,
-                       small_run=False, image_size=2, demo_path=None, n_images=-1):
+                       small_run=False, image_size=2, demo_path=None, n_images=-1, has_depth=True):
     """
     Get a PyTorch dataloader for the specified dataset using arguments from a configuration file.
 
@@ -145,7 +145,12 @@ def prepare_dataloader(mode='training', dataset_name='Sintel', shuffle=False, ba
             f"Dataset configuration for {dataset_name} not found.")
 
     # Update dataset arguments with runtime parameters
-    dataset_args['split'] = mode
+    if dataset_name.lower() == 'kitti15' and mode.lower() == 'testing':
+        dataset_args['split'] = 'testing'
+        dataset_args['has_gt'] = False
+        dataset_args['has_depth'] = False
+    else:
+        dataset_args['split'] = mode
     dataset_args['frames'] = image_size
     if dataset_name == 'Demo':
         dataset_args['root'] = demo_path

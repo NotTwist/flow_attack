@@ -4,22 +4,26 @@ import numpy as np
 import mlflow
 import cv2
 from typing import Literal
-from utils.process_images import quickvis_flow, save_depth
+from utils.process_images import quickvis_flow, save_depth, save_segmentation
 from datetime import datetime
 from ptlflow.utils import flow_utils
 import cv2 as cv
+from scipy.stats import pearsonr, spearmanr
 
 class AttackMetricsTracker:
-    def __init__(self, output_dir="experiment_data", experiment_name="attack_experiment", run_name=None, args=None):
+    def __init__(self, output_dir="experiment_data", experiment_name="attack_experiment", run_name=None, args=None, train=False):
         self.output_dir = output_dir
         os.makedirs(self.output_dir, exist_ok=True)
         mlflow.set_experiment(experiment_name)
 
         if run_name is None:
             current_date = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-            run_name = f"{args.model_name}_{args.attack_type}_{args.dataset}_{current_date}"
-
-        mlflow.start_run(run_name=run_name)
+            if train:
+                run_name = f"train_{args.model_name}_{args.attack_type}_{args.dataset}_{current_date}"
+            else:
+                run_name = f"{args.model_name}_{args.attack_type}_{args.dataset}_{current_date}"
+        self.run_name = run_name
+        mlflow.start_run(run_name=self.run_name)
         print(
             f"Running experiment: {experiment_name}, with run name: {run_name}")
 
@@ -45,6 +49,10 @@ class AttackMetricsTracker:
         self.saved_iterations = args.saved_iterations if args.saved_iterations else []
         self.reset()
 
+    def log_metric(self, name, value, step):
+        mlflow.log_metric(
+                   name, value, step)
+    
     def reset(self):
         """Reset cumulative metric values and counts."""
         self.cumulative_metrics = {
@@ -55,7 +63,9 @@ class AttackMetricsTracker:
             "reconstruction_error": 0.0,
             "aee_target_attack": 0.0,
             "mde_rmse_init_attack": 0.0,
-            "mde_rmse_target_attack": 0.0
+            "mde_rmse_target_attack": 0.0,
+            "ase_init_attack": 0.0,
+            "ase_target_attack": 0.0
         }
         self.count = 0
 
@@ -69,7 +79,9 @@ class AttackMetricsTracker:
                 f"reconstruction_error_step_{step}": 0.0,
                 f"aee_target_attack_step_{step}": 0.0,
                 f"mde_rmse_init_attack_step_{step}": 0.0,
-                f"mde_rmse_target_attack_step_{step}": 0.0
+                f"mde_rmse_target_attack_step_{step}": 0.0,
+                f"ase_init_attack_step_{step}": 0.0,
+                f"ase_target_attack_step_{step}": 0.0
             })
 
     def compute_aee(self, flow1, flow2, mask=None):
@@ -136,37 +148,81 @@ class AttackMetricsTracker:
             pred_depth = pred_depth.unsqueeze(1)
         if gt_depth.ndim == 3:
             gt_depth = gt_depth.unsqueeze(1)
-        # optional mask
+
+        B = pred_depth.size(0)
+
+        # default mask = all valid pixels
         if mask is None:
             mask = torch.ones_like(gt_depth, dtype=torch.bool)
-        # compute squared error
-        diff = pred_depth - gt_depth
-        sq = diff.pow(2)
-        # apply mask
-        sq = sq[mask]
-        # reshape per batch
-        B = pred_depth.size(0)
-        if B > 1:
-            # compute rmse per batch
-            rmse = []
-            idx = 0
-            for b in range(B):
-                num = mask[b].sum()
-                se = sq[idx: idx + num].sum()
-                rmse.append(torch.sqrt(se / num))
-                idx += num
-            return torch.stack(rmse)
-        else:
-            # single sample
-            mse = sq.mean()
-            return torch.sqrt(mse)
+        if mask.ndim == 3:
+            mask = mask.unsqueeze(1)
 
+        # squeeze channel dimension (B,1,H,W) -> (B,H,W)
+        pred_depth = pred_depth.squeeze(1)
+        gt_depth = gt_depth.squeeze(1)
+        mask = mask.squeeze(1)
 
-    def update(self, original_flow, attacked_flow, gt_flow=None, target_flow=None, inverse_flow=None, valid=None, tracked_flows=None, original_depth=None, attacked_depth=None, target_depth=None, tracked_depths=None):
+        # compute per-sample RMSE safely without flattening across batch
+        rmse_list = []
+        for b in range(B):
+            valid_mask = mask[b] 
+            diff = pred_depth[b][valid_mask] - gt_depth[b][valid_mask]
+            mse = (diff ** 2).mean()
+            rmse_list.append(torch.sqrt(mse))
+
+        return torch.stack(rmse_list)
+
+    def compute_depth_correlation(self, pred_depth: torch.Tensor, gt_depth: torch.Tensor, mask: torch.Tensor = None):
+        pred = pred_depth.detach().cpu().numpy().flatten()
+        gt = gt_depth.detach().cpu().numpy().flatten()
+
+        # Apply mask if provided
+        if mask is not None:
+            mask = mask.detach().cpu().numpy().flatten().astype(bool)
+            pred = pred[mask]
+            gt = gt[mask]
+        # print(pred.shape, gt_depth.shape)
+        pearson_corr, _ = pearsonr(gt, pred)
+        spearman_corr, _ = spearmanr(gt, pred)
+        return pearson_corr, spearman_corr
+        
+    def compute_segmentation_attack_error(self, original_seg, attacked_seg, target_seg=None):
+        """
+        Compute segmentation attack error independent of GT.
+        Args:
+            original_seg (torch.Tensor or np.ndarray): Original predicted segmentation [B,H,W].
+            attacked_seg (torch.Tensor or np.ndarray): Attacked predicted segmentation [B,H,W].
+            target_seg (torch.Tensor or np.ndarray, optional): Target segmentation [B,H,W].
+        Returns:
+            dict: {
+                'ase_init_attack': error between original and attacked prediction,
+                'ase_target_attack': error between attacked prediction and target (if provided)
+            }
+        """
+        if torch.is_tensor(original_seg):
+            original_seg = original_seg.detach().cpu().numpy()
+        if torch.is_tensor(attacked_seg):
+            attacked_seg = attacked_seg.detach().cpu().numpy()
+        if target_seg is not None and torch.is_tensor(target_seg):
+            target_seg = target_seg.detach().cpu().numpy()
+
+        # Error between original and attacked
+        ase_init_attack = np.mean(original_seg != attacked_seg)
+
+        # Error between attacked and target, if target exists
+        ase_target_attack = np.mean(
+            attacked_seg != target_seg) if target_seg is not None else 0.0
+
+        return {
+            "ase_init_attack": ase_init_attack,
+            "ase_target_attack": ase_target_attack
+        }
+
+    def update(self, original_flow, attacked_flow, gt_flow=None, target_flow=None, inverse_flow=None, mask=None, valid=None, tracked_flows=None, original_depth=None, attacked_depth=None, target_depth=None, tracked_depths=None, original_seg=None, attacked_seg=None, target_seg=None, tracked_segs=None):
         """Update metrics for the current batch."""
-        aee_attack = self.compute_aee(original_flow, attacked_flow)
+        aee_attack = self.compute_aee(original_flow, attacked_flow, mask)
         aee_attack_target = self.compute_aee(
-            attacked_flow, target_flow)
+            attacked_flow, target_flow, mask)
 
         aee_gt = self.compute_aee(
             original_flow, gt_flow, valid) if gt_flow is not None else 0.0
@@ -176,15 +232,29 @@ class AttackMetricsTracker:
         rec_error = self.compute_reconstruction_error(
             original_flow, inverse_flow) if inverse_flow is not None else 0.0
 
-
+        # MDE
         if original_depth is not None and attacked_depth is not None:
-            mde_rmse_attack = self.compute_rmse(original_depth, attacked_depth)
+            mde_rmse_attack = self.compute_rmse(original_depth, attacked_depth, mask)
             self.cumulative_metrics["mde_rmse_init_attack"] += mde_rmse_attack
             mlflow.log_metric("mde_rmse_init_attack", mde_rmse_attack, step=self.count)
-            mde_rmse_attack_target = self.compute_aee(attacked_depth, target_depth)
+            mde_rmse_attack_target = self.compute_rmse(attacked_depth, target_depth, mask)
             self.cumulative_metrics["mde_rmse_target_attack"] += mde_rmse_attack_target
             mlflow.log_metric("mde_rmse_target_attack", mde_rmse_attack_target, step=self.count)
-
+            
+            pearson_corr, spearman_corr = self.compute_depth_correlation(original_depth, attacked_depth, mask)
+            mlflow.log_metric("mde_pearson_init_attack",
+                              pearson_corr, step=self.count)
+            mlflow.log_metric("mde_spearman_init_attack",
+                              spearman_corr, step=self.count)
+        # Segmentation
+        if original_seg is not None and attacked_seg is not None:
+            seg_metrics = self.compute_segmentation_attack_error(
+                original_seg, attacked_seg, target_seg
+            )
+            for k, v in seg_metrics.items():
+                self.cumulative_metrics[k] += v
+                mlflow.log_metric(k, v, step=self.count)
+                
         # Update cumulative metrics
         self.cumulative_metrics["aee_init_attack"] += aee_attack
         self.cumulative_metrics["aee_init_gt"] += aee_gt
@@ -212,9 +282,9 @@ class AttackMetricsTracker:
         if self.saved_iterations:
             for step in self.saved_iterations:
                 attacked_flow = tracked_flows[step]
-                aee_attack = self.compute_aee(original_flow, attacked_flow)
+                aee_attack = self.compute_aee(original_flow, attacked_flow, mask)
                 aee_attack_target = self.compute_aee(
-                    attacked_flow, target_flow)
+                    attacked_flow, target_flow, mask=mask)
 
                 aee_gt = self.compute_aee(
                     original_flow, gt_flow, valid) if gt_flow is not None else 0.0
@@ -251,14 +321,25 @@ class AttackMetricsTracker:
                 # mde
                 if tracked_depths is not None:
                     attacked_depth = tracked_depths[step]
-                    mde_rmse_attack = self.compute_rmse(original_depth, attacked_depth)
+                    mde_rmse_attack = self.compute_rmse(original_depth, attacked_depth, mask)
                     mlflow.log_metric( f"mde_rmse_init_attack_step_{step}", mde_rmse_attack, step=self.count)
                     self.cumulative_metrics[f"mde_rmse_init_attack_step_{step}"] += mde_rmse_attack
                     
-                    mde_rmse_attack_target = self.compute_aee(attacked_depth, target_depth)
+                    mde_rmse_attack_target = self.compute_rmse(
+                        attacked_depth, target_depth, mask)
                     self.cumulative_metrics[f"mde_rmse_target_attack_step_{step}"] += mde_rmse_attack_target
                     mlflow.log_metric(f"mde_rmse_target_attack_step_{step}", mde_rmse_attack_target, step=self.count)
                     
+                if tracked_segs is not None:
+                    attacked_seg_step = tracked_segs[step]
+                    seg_metrics = self.compute_segmentation_attack_error(
+                        original_seg, attacked_seg_step, target_seg
+                    )
+                    for k, v in seg_metrics.items():
+                        step_key = f"{k}_step_{step}"
+                        self.cumulative_metrics[step_key] += v
+                        mlflow.log_metric(step_key, v, step=self.count)
+                        
         self.save_mean_metrics(step=self.count)
     def get_mean_metrics(self):
         """
@@ -326,6 +407,8 @@ class AttackMetricsTracker:
         elif artifact_type == 'depth':
             # print(artifact.shape)
             save_depth(artifact, artifact_path)
+        elif artifact_type == 'ss':
+            save_segmentation(artifact, artifact_path)
         mlflow.log_artifact(artifact_path)
         # print(f"Artifact saved to {artifact_path}")
 
@@ -336,6 +419,7 @@ class AttackMetricsTracker:
         mean_metrics = self.get_mean_metrics()
         if not mean_metrics:
             print("No final metrics to save.")
+            mlflow.end_run()
             return
 
         # Print final metrics once
@@ -345,7 +429,12 @@ class AttackMetricsTracker:
         print(
             f"AEE (attacked vs target): {mean_metrics.get('aee_target_attack', 'N/A'):.4f}")
 
-
+        try:
+            mlflow.end_run()
+            print("MLflow run ended.")
+        except Exception as e:
+            print("mlflow.end_run() failed:", e)
+            
     def save_flow(self, flow):
         flow = flow.permute(1, 2, 0)  # change from CHW to HWC shape
         flow = flow.detach().cpu().numpy()
@@ -353,3 +442,4 @@ class AttackMetricsTracker:
         flow_viz = cv.cvtColor(flow_viz, cv.COLOR_BGR2RGB)
         cv.imwrite('test.png', flow_viz)
         # mlflow.log_artifact(artifact_path)
+        

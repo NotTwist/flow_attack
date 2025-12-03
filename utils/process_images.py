@@ -1,3 +1,5 @@
+import matplotlib.pyplot as plt
+import matplotlib
 from PIL import Image
 import torch.nn.functional as F
 import os
@@ -8,6 +10,7 @@ import numpy as np
 import torch
 import copy
 from typing import Dict
+import cv2
 
 class InputPadder:
     """Pads images such that dimensions are divisible by divisor
@@ -222,9 +225,63 @@ def replace_images_dic(
     return output_dic
 
 def save_depth(artifact, artifact_path):
-    depth = artifact.squeeze(0,1).cpu().numpy()  # → [518, 1722]
+    depth = artifact.squeeze(0,1).detach().cpu().numpy()  # → [518, 1722]
     min_v, max_v = depth.min(), depth.max()
     depth = (depth - min_v) / (max_v - min_v)
     depth = (depth * 255).clip(0, 255).astype('uint8')
     img = Image.fromarray(depth)  
     img.save(artifact_path)
+
+matplotlib.use("Agg")  # avoid X server issues
+
+
+# Cityscapes 19 классов + их имена
+classes = [
+    "road", "sidewalk", "building", "wall", "fence",
+    "pole", "traffic light", "traffic sign", "vegetation",
+    "terrain", "sky", "person", "rider", "car", "truck",
+    "bus", "train", "motorcycle", "bicycle"
+]
+num_classes = len(classes)
+
+# Colormap
+cmap = plt.get_cmap('tab20')
+color_map = (np.array([cmap(i / num_classes)[:3]
+             for i in range(num_classes)]) * 255).astype(np.uint8)
+
+
+def save_segmentation(seg_tensor, filename, color_map=color_map, classes=classes):
+    """
+    Save semantic segmentation mask as colored image with legend.
+    """
+    if torch.is_tensor(seg_tensor):
+            seg_tensor = seg_tensor.detach().cpu().numpy()
+    if seg_tensor.ndim == 3:
+        seg_tensor = seg_tensor.squeeze(0)
+    seg_tensor = seg_tensor.astype(np.int32)
+
+    # Map class IDs to colors
+    color_mask = color_map[seg_tensor]
+
+    # Создаём легенду вертикально
+    swatch_width = 150
+    legend_img = np.zeros((num_classes * 50, swatch_width, 3), dtype=np.uint8)
+    for i, color in enumerate(color_map):
+        y0 = i * 50
+        y1 = y0 + 50
+        legend_img[y0:y1, :, :] = color
+        cv2.putText(
+            legend_img, classes[i], (10, y0 + 35),
+            cv2.FONT_HERSHEY_SIMPLEX, 0.6,
+            (255,255,255) if np.mean(color)<128 else (0,0,0), 2
+        )
+
+    # Ресайз легенды под высоту изображения
+    H, W, _ = color_mask.shape
+    legend_img_resized = cv2.resize(legend_img, (swatch_width, H))
+
+    # Склеиваем справа
+    final_img = np.hstack([color_mask, legend_img_resized])
+
+    # Сохраняем
+    cv2.imwrite(filename, cv2.cvtColor(final_img, cv2.COLOR_RGB2BGR))
