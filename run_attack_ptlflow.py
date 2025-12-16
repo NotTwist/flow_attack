@@ -20,13 +20,17 @@ from utils.targets import get_mde_target
 def load_model(model_name, dataset):
     model_ref = ptlflow.get_model_reference(model_name)
     checkpoints = model_ref.pretrained_checkpoints.keys()
+    print(checkpoints)
     for c in checkpoints:
         if c in dataset:
             model = ptlflow.get_model(model_name, c)
             return model
+        else:
+            print(f"Using checkpoint from other dataset!: {c}")
+            model = ptlflow.get_model(model_name, c)
+            return model
     print(f"No pre-trained model available for {model}/{dataset}.")
     return None
-
 
 
 def main():
@@ -35,7 +39,7 @@ def main():
 
     # Initialize metrics tracker
     metrics_tracker = AttackMetricsTracker(
-        output_dir=args.output_dir, args=args)
+        output_dir=args.output_dir, experiment_name=args.experiment_name, args=args)
     set_seed(42)
 
     # Prepare data loader
@@ -64,6 +68,7 @@ def main():
     original_depth = None
     mde_target = None
     tracked_depths = None
+    mde_target_fn = None
     if args.attack_mde:
         mde_model = load_mde_model(model_name=args.mde_model, device=device)
         # создаём функцию-таргет, которая внутри себя лениво посчитает p90
@@ -131,7 +136,7 @@ def main():
 
         inverse_flow = None
         # Update metrics
-        metrics_tracker.update(original_flow, flow_pred,
+        metrics_tracker.update(original_flow, flow_pred, original_img=get_image_tensors(attacked_images)[0], second_img=get_image_tensors(inputs)[1],
                                gt_flow=flow, target_flow=of_target, inverse_flow=inverse_flow, valid=valid, tracked_flows=tracked_flows, original_depth=original_depth, attacked_depth = depth_pred, target_depth=mde_target, tracked_depths = tracked_depths, original_seg=original_ss, attacked_seg=ss_pred, target_seg=ss_target, tracked_segs=tracked_ss)
 
         # Save artifacts if required
@@ -141,7 +146,7 @@ def main():
                     metrics_tracker.save_artifact(
                         masks[step], f"batch_{batch:04d}_mask_step_{step}", artifact_type="image")
             metrics_tracker.save_artifact(
-                get_image_tensors(inputs)[0], f"batch_{batch:04d}_attacked_image", artifact_type="image")
+                get_image_tensors(attacked_images)[0], f"batch_{batch:04d}_attacked_image", artifact_type="image")
             metrics_tracker.save_artifact(
                 flow_pred, f"batch_{batch:04d}_attacked_flow", artifact_type="flow")
             metrics_tracker.save_artifact(

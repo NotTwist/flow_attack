@@ -461,12 +461,12 @@ class MDEModel(torch.nn.Module):
         outputs = self.model(pixel_values = px)
         # print(outputs.predicted_depth.min(), outputs.predicted_depth.max())
         # 3) Пост‑процессинг в PyTorch
+        orig_height, orig_width = tensor.shape[1], tensor.shape[2]
         depth_logits = outputs.predicted_depth.unsqueeze(1)  # [B,1,H',W']
         
         depth_map = F.interpolate(
-            depth_logits, size=(375, 1242), mode="bicubic", align_corners=False
+            depth_logits, size=(orig_height, orig_width), mode="bicubic", align_corners=False
         )
-        # простая нормализация (ваша normalize_depth_tensor сейчас на CPU)
 
 
         return depth_map  # GPU‑тензор с grad_fn

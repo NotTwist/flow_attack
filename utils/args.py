@@ -36,6 +36,9 @@ def parse_args():
     # Output directory for saving results
     parser.add_argument('--output_dir', type=str, default="experiment_data",
                         help="Directory to save experiment outputs.")
+    
+    parser.add_argument('--experiment_name', type=str, default="attack_experiment",
+                        help="Name of experiment for mlflow.")
 
     # Save artifacts flag
     parser.add_argument('--save_artifacts', action='store_true',
@@ -146,4 +149,24 @@ def parse_args():
     parser.add_argument("--patch_projection", action='store_true',
                                                help='Use patch projection from adv manhole')
 
+
+    parser.add_argument(
+        "--y_scale",  type=float, default=1, help="patch scaling on y axis")
+    parser.add_argument(
+        "--tv_weight",
+        type=float,
+        default=0,
+        help="Weight for total variation regularization"
+    )
+
+    # Non-printability score weight
+    parser.add_argument(
+        "--nps_weight",
+        type=float,
+        default=0,
+        help="Weight for non-printability score regularization"
+    )
+    
+    parser.add_argument("--plane_aug", action='store_true',
+                        help='Attack SS model at the same time')
     return parser.parse_args()

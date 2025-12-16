@@ -7,6 +7,9 @@ env/
 *.env
 *.log
 *.zip 
+*.png
+*.mp4
+*.pth
 
 datasets/
 models/_pretrained_weights/

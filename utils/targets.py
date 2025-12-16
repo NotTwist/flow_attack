@@ -124,7 +124,7 @@ def untargeted_depth(depth):
 def infinite_depth(depth):
     """Simulate infinite depth (far away objects)."""
     # Use the maximum representable depth value or a large constant
-    d_max = depth.max()
+    d_max = depth.detach().max()
     return torch.ones_like(depth) * d_max
 
 

@@ -9,6 +9,8 @@ from datetime import datetime
 from ptlflow.utils import flow_utils
 import cv2 as cv
 from scipy.stats import pearsonr, spearmanr
+import torch
+import torch.nn.functional as F
 
 class AttackMetricsTracker:
     def __init__(self, output_dir="experiment_data", experiment_name="attack_experiment", run_name=None, args=None, train=False):
@@ -65,7 +67,9 @@ class AttackMetricsTracker:
             "mde_rmse_init_attack": 0.0,
             "mde_rmse_target_attack": 0.0,
             "ase_init_attack": 0.0,
-            "ase_target_attack": 0.0
+            "ase_target_attack": 0.0, 
+            "iou_init_attack": 0.0,
+            "iou_target_attack": 0.0
         }
         self.count = 0
 
@@ -81,7 +85,9 @@ class AttackMetricsTracker:
                 f"mde_rmse_init_attack_step_{step}": 0.0,
                 f"mde_rmse_target_attack_step_{step}": 0.0,
                 f"ase_init_attack_step_{step}": 0.0,
-                f"ase_target_attack_step_{step}": 0.0
+                f"ase_target_attack_step_{step}": 0.0,
+                f"iou_init_attack_step_{step}": 0.0,
+                f"iou_target_attack_step_{step}": 0.0
             })
 
     def compute_aee(self, flow1, flow2, mask=None):
@@ -112,22 +118,91 @@ class AttackMetricsTracker:
                 flow1.size()) + " and " + str(flow1.size()))
         return epe
 
-    def compute_reconstruction_error(self, flow, inverse_flow):
+
+
+    def compute_reconstruction_error(self, img1, img2, flow, mask=None):
         """
-        Compute reconstruction error using inverse flow.
-        Here we assume a simple L2 error between the original flow and the inverse flow.
+        Photometric reconstruction error (L1):
+        Warp img2 back into img1 coordinate system using forward optical flow.
+
         Args:
-            flow (torch.Tensor or np.ndarray): Original flow [B,2,H,W] or [2,H,W].
-            inverse_flow (torch.Tensor or np.ndarray): Inverse flow [B,2,H,W] or [2,H,W].
+            img1: torch.Tensor [C,H,W] or [B,C,H,W]
+            img2: same shape as img1
+            flow: torch.Tensor [2,H,W] or [B,2,H,W]
+            mask: optional mask [H,W] or [B,1,H,W]
+
         Returns:
-            float: Reconstruction error.
+            float — mean photometric L1 error
+            torch.Tensor — warped img2 in CHW or BCHW format
         """
-        if torch.is_tensor(flow):
-            flow = flow.detach().cpu().numpy()
-        if torch.is_tensor(inverse_flow):
-            inverse_flow = inverse_flow.detach().cpu().numpy()
-        error = np.linalg.norm(flow - inverse_flow, axis=0)
-        return np.mean(error)
+
+        # ---- 1. Ensure batch dimension ----
+        if img1.ndim == 3:  # CHW
+            img1 = img1.unsqueeze(0)  # B=1
+        if img2.ndim == 3:
+            img2 = img2.unsqueeze(0)
+        if flow.ndim == 3:  # 2,H,W
+            flow = flow.unsqueeze(0)
+
+        device = flow.device
+        img1 = img1.to(device)
+        img2 = img2.to(device)
+        flow = flow.to(device)
+        if mask is not None and torch.is_tensor(mask):
+            mask = mask.to(device)
+            
+        B, C, H, W = img1.shape
+        device = img1.device
+
+        # ---- 2. Build meshgrid ----
+        yy, xx = torch.meshgrid(
+            torch.arange(H, device=device),
+            torch.arange(W, device=device),
+            indexing="ij"
+        )
+
+        # Forward flow defines sampling coords in img2:
+        # x2 = x1 + flow_x; y2 = y1 + flow_y
+        x_new = xx[None] + flow[:, 0]
+        y_new = yy[None] + flow[:, 1]
+
+        # ---- 3. Normalize coords for grid_sample ----
+        x_norm = 2 * (x_new / (W - 1)) - 1
+        y_norm = 2 * (y_new / (H - 1)) - 1
+        grid = torch.stack((x_norm, y_norm), dim=-1)  # [B,H,W,2]
+
+        # ---- 4. Warp img2 → img1 space ----
+        img2_warped = F.grid_sample(
+            img2,
+            grid,
+            mode="bilinear",
+            padding_mode="border",
+            align_corners=True
+        )
+
+        # ---- 5. Compute photometric L1 error ----
+        photometric_error = (img1 - img2_warped).abs().mean(dim=1)  # [B,H,W]
+
+        # ---- 6. Apply mask if provided ----
+        if mask is not None:
+            if torch.is_tensor(mask):
+                if mask.ndim == 2:  # H,W
+                    mask = mask.unsqueeze(0)  # B=1
+                if mask.ndim == 3:  # B,H,W
+                    mask = mask.unsqueeze(1)  # B,1,H,W
+
+                mask = mask.squeeze(1)  # B,H,W
+                photometric_error = photometric_error[mask]
+
+        # ---- 7. Return mean error + warped image (CHW or BCHW) ----
+        error_value = photometric_error.mean().item()
+
+        # if original was CHW, output should be CHW
+        if img1.shape[0] == 1:
+            img2_warped = img2_warped.squeeze(0)
+
+        return error_value, img2_warped
+
 
         
     def compute_rmse(self, pred_depth: torch.Tensor, gt_depth: torch.Tensor, mask: torch.Tensor = None) -> torch.Tensor:
@@ -218,7 +293,61 @@ class AttackMetricsTracker:
             "ase_target_attack": ase_target_attack
         }
 
-    def update(self, original_flow, attacked_flow, gt_flow=None, target_flow=None, inverse_flow=None, mask=None, valid=None, tracked_flows=None, original_depth=None, attacked_depth=None, target_depth=None, tracked_depths=None, original_seg=None, attacked_seg=None, target_seg=None, tracked_segs=None):
+    def compute_iou(self, pred_seg, gt_seg, num_classes, mask=None):
+        """
+        Compute mean IoU for semantic segmentation.
+
+        Args:
+            pred_seg: predicted segmentation [B,H,W] or [H,W]
+            gt_seg:   ground truth segmentation [B,H,W] or [H,W]
+            num_classes: number of segmentation classes
+            mask: optional mask [B,H,W] or [H,W] (boolean tensor)
+
+        Returns:
+            float — mean IoU over all classes present in GT
+        """
+        # Convert tensors -> numpy
+        if torch.is_tensor(pred_seg):
+            pred_seg = pred_seg.detach().cpu().numpy()
+        if torch.is_tensor(gt_seg):
+            gt_seg = gt_seg.detach().cpu().numpy()
+        if mask is not None and torch.is_tensor(mask):
+            mask = mask.detach().cpu().numpy().astype(bool)
+
+        # Ensure batch dimension
+        if pred_seg.ndim == 2:
+            pred_seg = pred_seg[None, ...]
+            gt_seg = gt_seg[None, ...]
+            if mask is not None:
+                mask = mask[None, ...]
+
+        B = pred_seg.shape[0]
+        ious = []
+
+        for cls in range(num_classes):
+            # Boolean masks for this class
+            pred_cls = (pred_seg == cls)
+            gt_cls = (gt_seg == cls)
+
+            if mask is not None:
+                pred_cls = pred_cls & mask
+                gt_cls = gt_cls & mask
+
+            intersection = np.logical_and(pred_cls, gt_cls).sum()
+            union = np.logical_or(pred_cls, gt_cls).sum()
+
+            # Ignore classes that do not appear in GT
+            if union == 0:
+                continue
+
+            ious.append(intersection / union)
+
+        if len(ious) == 0:
+            return 0.0
+
+        return float(np.mean(ious))
+
+    def update(self, original_flow, attacked_flow, original_img=None, second_img=None, gt_flow=None, target_flow=None, inverse_flow=None, mask=None, valid=None, tracked_flows=None, original_depth=None, attacked_depth=None, target_depth=None, tracked_depths=None, original_seg=None, attacked_seg=None, target_seg=None, tracked_segs=None):
         """Update metrics for the current batch."""
         aee_attack = self.compute_aee(original_flow, attacked_flow, mask)
         aee_attack_target = self.compute_aee(
@@ -229,8 +358,17 @@ class AttackMetricsTracker:
         aee_attacked_gt = self.compute_aee(
             attacked_flow, gt_flow, valid) if gt_flow is not None else 0.0
         diff_error = aee_attacked_gt - aee_gt if gt_flow is not None else 0.0
-        rec_error = self.compute_reconstruction_error(
-            original_flow, inverse_flow) if inverse_flow is not None else 0.0
+        if original_img is not None and second_img is not None:
+            rec_error, warped_img = self.compute_reconstruction_error(
+                img1=original_img,
+                img2=second_img,
+                flow=attacked_flow,
+                mask=mask
+            )
+            self.cumulative_metrics["reconstruction_error"] += rec_error
+            mlflow.log_metric("reconstruction_error", rec_error, step=self.count)
+        else:
+            rec_error = 0.0
 
         # MDE
         if original_depth is not None and attacked_depth is not None:
@@ -255,12 +393,23 @@ class AttackMetricsTracker:
                 self.cumulative_metrics[k] += v
                 mlflow.log_metric(k, v, step=self.count)
                 
+        if original_seg is not None and attacked_seg is not None and target_seg is not None:
+            num_classes = int(max(original_seg.max(), attacked_seg.max(), target_seg.max()) + 1)
+
+            iou_init = self.compute_iou(original_seg, attacked_seg, num_classes, mask)
+            iou_target = self.compute_iou(attacked_seg, target_seg, num_classes, mask)
+
+            mlflow.log_metric("iou_init_attack", iou_init, step=self.count)
+            mlflow.log_metric("iou_target_attack", iou_target, step=self.count)
+
+            self.cumulative_metrics["iou_init_attack"] += iou_init
+            self.cumulative_metrics["iou_target_attack"] += iou_target
+
         # Update cumulative metrics
         self.cumulative_metrics["aee_init_attack"] += aee_attack
         self.cumulative_metrics["aee_init_gt"] += aee_gt
         self.cumulative_metrics["aee_attacked_gt"] += aee_attacked_gt
         self.cumulative_metrics["gt_diff_error"] += diff_error
-        self.cumulative_metrics["reconstruction_error"] += rec_error
         self.cumulative_metrics["aee_target_attack"] += aee_attack_target
         self.count += 1
 
@@ -274,9 +423,7 @@ class AttackMetricsTracker:
             mlflow.log_metric("aee_attacked_gt",
                               aee_attacked_gt, step=self.count)
             mlflow.log_metric("gt_diff_error", diff_error, step=self.count)
-        if inverse_flow is not None:
-            mlflow.log_metric("reconstruction_error",
-                              rec_error, step=self.count)
+
 
         # Process dynamically defined iterations
         if self.saved_iterations:
@@ -291,8 +438,15 @@ class AttackMetricsTracker:
                 aee_attacked_gt = self.compute_aee(
                     attacked_flow, gt_flow, valid) if gt_flow is not None else 0.0
                 diff_error = aee_attacked_gt - aee_gt if gt_flow is not None else 0.0
-                rec_error = self.compute_reconstruction_error(
-                    original_flow, inverse_flow) if inverse_flow is not None else 0.0
+                if original_img is not None and second_img is not None:
+                    rec_error, warped_img = self.compute_reconstruction_error(
+                        img1=original_img,
+                        img2=second_img,
+                        flow=attacked_flow,
+                        mask=mask
+                    )
+                else:
+                    rec_error = 0.0
 
                 mlflow.log_metric(
                     f"aee_init_attack_step_{step}", aee_attack, step=self.count)

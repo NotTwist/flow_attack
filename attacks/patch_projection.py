@@ -503,3 +503,159 @@ def keep_largest_component(road_mask: torch.Tensor) -> torch.Tensor:
         return out.bool()
     else:
         return out
+
+import torch
+import torch.nn.functional as F
+from .adversarial_manhole.adv_manhole.texture_mapping.depth_utils import disp_to_depth
+
+
+def project_patch_on_scene(
+    I1_batch,
+    I2_batch,
+    K,
+    A,                       # PatchAdversary
+    mde_model=None,
+    ss_model=None,
+    io_adapter=None,
+    device="cuda",
+    plane_aug=True,
+    plane_aug_angle=5.0,
+    road_class_id=0,
+):
+    """
+    Универсальная функция проецирования патча A на дорожную плоскость
+    с учетом:
+        - mde depth (depth → plane fit)
+        - semantic segmentation mask (road region)
+        - plane tilt augmentation
+        - patch projection PatchAdversary(A)
+
+    Возвращает:
+        I1_p_batch, I2_p_batch  — изображения с патчем
+        M_batch                 — маска патча
+        ys_batch, xs_batch      — координаты центра патча на исходном изображении
+        road_mask               — маска дороги
+        planes                  — fitted planes
+    """
+
+    B = I1_batch.shape[0]
+
+    # ---------------------------------------------------------
+    # 1. Compute depth via MDE model
+    # ---------------------------------------------------------
+    if mde_model is not None:
+        inp = io_adapter.prepare_inputs(
+            inputs={'images': torch.stack([I1_batch, I2_batch], dim=1)}
+        )
+
+        with torch.no_grad():
+            mde_out_unatt = mde_model(inp)
+
+        if mde_out_unatt is not None:
+            # Ensure shape [B,1,H,W]
+            if mde_out_unatt.dim() == 2:
+                depth_pred = mde_out_unatt.unsqueeze(0).unsqueeze(0)
+            elif mde_out_unatt.dim() == 3:
+                depth_pred = mde_out_unatt.unsqueeze(1)
+            else:
+                depth_pred = mde_out_unatt
+
+            depth_pred = disp_to_depth(depth_pred.to(device).float())
+        else:
+            depth_pred = None
+    else:
+        depth_pred = None
+
+    # ---------------------------------------------------------
+    # 2. Compute road mask from segmentation model (optional)
+    # ---------------------------------------------------------
+    if ss_model is not None:
+        inp = io_adapter.prepare_inputs(
+            inputs={'images': torch.stack([I1_batch, I2_batch], dim=1)}
+        )
+        with torch.no_grad():
+            ss_logits = ss_model(inp, return_logits=True)
+
+        ss_pred = ss_logits.argmax(dim=1)  # [B,H,W]
+        road_mask = (ss_pred == road_class_id).unsqueeze(1)  # [B,1,H,W]
+        road_mask = keep_largest_component(road_mask)        # stabilize
+    else:
+        road_mask = None
+
+    # ---------------------------------------------------------
+    # 3. Fit plane from depth
+    # ---------------------------------------------------------
+    if depth_pred is not None:
+        planes = fit_plane_from_depth(depth_pred, K, road_mask)
+    else:
+        planes = None  # still allow PatchAdversary to run (flat projection)
+
+    # ---------------------------------------------------------
+    # 4. Random plane tilt augmentation (optional)
+    # ---------------------------------------------------------
+    if plane_aug and planes is not None:
+        planes = random_tilt_plane(planes, max_angle_deg=plane_aug_angle)
+
+    # ---------------------------------------------------------
+    # 5. Project patch using PatchAdversary(A)
+    # ---------------------------------------------------------
+    if planes is not None:
+        I1_p, I2_p, M_batch, ys_batch, xs_batch = A(
+            I1_batch, I2_batch,
+            K=K,
+            planes=planes,
+            road_masks=road_mask
+        )
+    else:
+        I1_p, I2_p, M_batch, ys_batch, xs_batch = A(I1_batch, I2_batch)
+
+    return (
+        I1_p,       # patched I1
+        I2_p,       # patched I2
+        M_batch,    # mask of patch
+        ys_batch,   # y-center
+        xs_batch,   # x-center
+        road_mask,
+        planes
+    )
+
+def random_tilt_plane(plane, max_angle_deg=5.0):
+    """
+    Добавляет небольшой случайный наклон нормали плоскости.
+    plane: tensor [B,4] or [4]
+    max_angle_deg: максимальный угол наклона в градусах
+    """
+    if plane.ndim == 1:
+        plane = plane.unsqueeze(0)  # → [1,4]
+
+    B = plane.shape[0]
+    device = plane.device
+    max_angle = max_angle_deg * torch.pi / 180.0
+
+    # исходная нормаль
+    n = plane[:, :3]
+    n = n / (n.norm(dim=1, keepdim=True) + 1e-9)
+
+    # случайные векторы
+    rand_vec = torch.randn((B, 3), device=device)
+    rand_vec = rand_vec / (rand_vec.norm(dim=1, keepdim=True) + 1e-9)
+
+    # случайные углы
+    angles = (torch.rand(B, 1, device=device) * 2 - 1) * max_angle  # [-max_angle, max_angle]
+
+    # формула вращения вектора вокруг случайной оси: Rodrigues rotation
+    k = rand_vec
+    k = k / (k.norm(dim=1, keepdim=True) + 1e-9)
+
+    cos = torch.cos(angles)
+    sin = torch.sin(angles)
+
+    n_rot = (
+        n * cos +
+        torch.cross(k, n, dim=1) * sin +
+        k * (torch.sum(k * n, dim=1, keepdim=True) * (1 - cos))
+    )
+
+    # пересборка плоскости (d оставляем прежним)
+    new_plane = torch.cat([n_rot, plane[:, 3:].clone()], dim=1)
+    return new_plane
