@@ -9,6 +9,7 @@ from glob import glob
 import os.path as osp
 import os
 from argparse import Namespace
+import json
 # from PCFA attack
 class FlowDataset(data.Dataset):
     def __init__(self, aug_params=None, sparse=False, frames=2):
@@ -324,3 +325,43 @@ class Demo(FlowDataset):
             self.image_y_dim, self.image_x_dim = img.size
 
 
+class Carla(FlowDataset):
+    def __init__(self, aug_params=None, split='eval', root=None, has_gt=False, frames=2, n_images=-1, camera_config="camera_config.json"):
+        super(Carla, self).__init__(aug_params)
+
+        self.has_gt = False
+        self.n_images = n_images
+        self.frames = frames
+        images1 = sorted(glob(osp.join(root,'rgb', '*.png')))[:-1]
+        images2 = sorted(glob(osp.join(root, 'rgb', '*.png')))[1:]
+
+        if self.n_images != -1:
+            images1 = images1[:self.n_images]
+            images2 = images2[:self.n_images]
+
+        image_list = sorted(glob(osp.join(root, 'rgb','*.png')))
+        for i in range(len(image_list)-1):
+            self.image_list.append([])
+            for d in range(-((self.frames - 1) // 2), self.frames // 2 + 1):
+                self.image_list[-1].append(
+                    image_list[min(max(i + d, 0), len(image_list) - 1)])
+            self.extra_info += [i]
+        cam_cfg_path = osp.join(root, camera_config)
+        if not osp.exists(cam_cfg_path):
+            raise RuntimeError(f"camera_config.json not found at {cam_cfg_path}")
+
+        with open(cam_cfg_path, "r") as f:
+            self.K = json.load(f)
+        if len(self.image_list) == 0:
+            raise RuntimeWarning(
+                "No  data found at dataset root '%s'. Check the configuration file under helper_functions/config_paths.py and add the correct path to the KITTI dataset." % root)
+
+        self.enforce_dimensions = True
+        image_path = images1[0]
+        with Image.open(image_path) as img:
+            self.image_y_dim, self.image_x_dim = img.size
+            
+    def __getitem__(self, index):
+        imgs, flow, valid, disp = super().__getitem__(index)
+        K = self.K # return corresponding K
+        return imgs, flow, valid, disp, K

@@ -9,16 +9,13 @@ epsilons=("8./255.")
 
 # Список моделей, которые ты перечислил
 models=(
-  "pwcnet"
-  "flowformer"
-  "gma"
-  "raft"
-  "sea_raft"
+  # "sea_raft"
+  # "flowformer"
   "videoflow_bof"
-  "memflow"
-  "flow1d"
-  "meflow"
-  "rpknet"
+  # "memflow"
+  # "flow1d"
+  # "meflow"
+  # "rpknet"
 )
 
 # Список атак из твоего задания

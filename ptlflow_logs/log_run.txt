@@ -42,3 +42,80 @@
 04/08/2025 20:31:42 - INFO: 	make_unit_input=True
 04/08/2025 20:32:28 - INFO: Creating a Model with scaled input and the following parameters:
 04/08/2025 20:32:28 - INFO: 	make_unit_input=True
+12/19/2025 07:19:54 - INFO: Loading pretrained weights from Hugging Face hub (timm/twins_svt_large.in1k)
+12/25/2025 15:34:04 - INFO: Loading pretrained weights from Hugging Face hub (timm/twins_svt_large.in1k)
+12/25/2025 15:34:09 - INFO: [timm/twins_svt_large.in1k] Safe alternative available for 'pytorch_model.bin' (as 'model.safetensors'). Loading weights using safetensors.
+12/25/2025 15:34:10 - INFO: Loading pretrained weights from Hugging Face hub (timm/twins_svt_large.in1k)
+12/25/2025 15:34:10 - INFO: [timm/twins_svt_large.in1k] Safe alternative available for 'pytorch_model.bin' (as 'model.safetensors'). Loading weights using safetensors.
+12/25/2025 21:43:00 - INFO: Loading pretrained weights from Hugging Face hub (timm/twins_svt_large.in1k)
+12/25/2025 21:43:00 - INFO: [timm/twins_svt_large.in1k] Safe alternative available for 'pytorch_model.bin' (as 'model.safetensors'). Loading weights using safetensors.
+12/25/2025 21:43:01 - INFO: Loading pretrained weights from Hugging Face hub (timm/twins_svt_large.in1k)
+12/25/2025 21:43:02 - INFO: [timm/twins_svt_large.in1k] Safe alternative available for 'pytorch_model.bin' (as 'model.safetensors'). Loading weights using safetensors.
+12/25/2025 23:36:32 - INFO: Loading pretrained weights from Hugging Face hub (timm/twins_svt_large.in1k)
+12/25/2025 23:36:32 - INFO: [timm/twins_svt_large.in1k] Safe alternative available for 'pytorch_model.bin' (as 'model.safetensors'). Loading weights using safetensors.
+12/25/2025 23:36:33 - INFO: Loading pretrained weights from Hugging Face hub (timm/twins_svt_large.in1k)
+12/25/2025 23:36:34 - INFO: [timm/twins_svt_large.in1k] Safe alternative available for 'pytorch_model.bin' (as 'model.safetensors'). Loading weights using safetensors.
+12/25/2025 23:36:50 - INFO: Loading pretrained weights from Hugging Face hub (timm/twins_svt_large.in1k)
+12/25/2025 23:36:51 - INFO: [timm/twins_svt_large.in1k] Safe alternative available for 'pytorch_model.bin' (as 'model.safetensors'). Loading weights using safetensors.
+12/25/2025 23:36:52 - INFO: Loading pretrained weights from Hugging Face hub (timm/twins_svt_large.in1k)
+12/25/2025 23:36:52 - INFO: [timm/twins_svt_large.in1k] Safe alternative available for 'pytorch_model.bin' (as 'model.safetensors'). Loading weights using safetensors.
+12/26/2025 01:19:40 - INFO: Loading pretrained weights from Hugging Face hub (timm/twins_svt_large.in1k)
+12/26/2025 01:19:41 - INFO: [timm/twins_svt_large.in1k] Safe alternative available for 'pytorch_model.bin' (as 'model.safetensors'). Loading weights using safetensors.
+12/26/2025 01:19:42 - INFO: Loading pretrained weights from Hugging Face hub (timm/twins_svt_large.in1k)
+12/26/2025 01:19:42 - INFO: [timm/twins_svt_large.in1k] Safe alternative available for 'pytorch_model.bin' (as 'model.safetensors'). Loading weights using safetensors.
+12/26/2025 02:43:38 - INFO: Loading pretrained weights from Hugging Face hub (timm/twins_svt_large.in1k)
+12/26/2025 02:43:39 - INFO: [timm/twins_svt_large.in1k] Safe alternative available for 'pytorch_model.bin' (as 'model.safetensors'). Loading weights using safetensors.
+12/26/2025 02:43:40 - INFO: Loading pretrained weights from Hugging Face hub (timm/twins_svt_large.in1k)
+12/26/2025 02:43:40 - INFO: [timm/twins_svt_large.in1k] Safe alternative available for 'pytorch_model.bin' (as 'model.safetensors'). Loading weights using safetensors.
+12/26/2025 04:09:15 - INFO: Loading pretrained weights from Hugging Face hub (timm/twins_svt_large.in1k)
+12/26/2025 04:09:15 - INFO: [timm/twins_svt_large.in1k] Safe alternative available for 'pytorch_model.bin' (as 'model.safetensors'). Loading weights using safetensors.
+12/26/2025 04:09:17 - INFO: Loading pretrained weights from Hugging Face hub (timm/twins_svt_large.in1k)
+12/26/2025 04:09:17 - INFO: [timm/twins_svt_large.in1k] Safe alternative available for 'pytorch_model.bin' (as 'model.safetensors'). Loading weights using safetensors.
+12/26/2025 05:32:25 - INFO: Loading pretrained weights from Hugging Face hub (timm/twins_svt_large.in1k)
+12/26/2025 05:32:25 - INFO: [timm/twins_svt_large.in1k] Safe alternative available for 'pytorch_model.bin' (as 'model.safetensors'). Loading weights using safetensors.
+12/26/2025 05:32:27 - INFO: Loading pretrained weights from Hugging Face hub (timm/twins_svt_large.in1k)
+12/26/2025 05:32:27 - INFO: [timm/twins_svt_large.in1k] Safe alternative available for 'pytorch_model.bin' (as 'model.safetensors'). Loading weights using safetensors.
+12/26/2025 05:32:54 - INFO: Loading pretrained weights from Hugging Face hub (timm/twins_svt_large.in1k)
+12/26/2025 05:32:54 - INFO: [timm/twins_svt_large.in1k] Safe alternative available for 'pytorch_model.bin' (as 'model.safetensors'). Loading weights using safetensors.
+12/26/2025 05:32:55 - INFO: Loading pretrained weights from Hugging Face hub (timm/twins_svt_large.in1k)
+12/26/2025 05:32:55 - INFO: [timm/twins_svt_large.in1k] Safe alternative available for 'pytorch_model.bin' (as 'model.safetensors'). Loading weights using safetensors.
+12/26/2025 05:33:25 - INFO: Loading pretrained weights from Hugging Face hub (timm/twins_svt_large.in1k)
+12/26/2025 05:33:25 - INFO: [timm/twins_svt_large.in1k] Safe alternative available for 'pytorch_model.bin' (as 'model.safetensors'). Loading weights using safetensors.
+12/26/2025 05:33:26 - INFO: Loading pretrained weights from Hugging Face hub (timm/twins_svt_large.in1k)
+12/26/2025 05:33:27 - INFO: [timm/twins_svt_large.in1k] Safe alternative available for 'pytorch_model.bin' (as 'model.safetensors'). Loading weights using safetensors.
+12/29/2025 02:25:18 - INFO: Loading pretrained weights from Hugging Face hub (timm/twins_svt_large.in1k)
+12/29/2025 02:25:18 - INFO: [timm/twins_svt_large.in1k] Safe alternative available for 'pytorch_model.bin' (as 'model.safetensors'). Loading weights using safetensors.
+12/29/2025 02:25:20 - INFO: Loading pretrained weights from Hugging Face hub (timm/twins_svt_large.in1k)
+12/29/2025 02:25:20 - INFO: [timm/twins_svt_large.in1k] Safe alternative available for 'pytorch_model.bin' (as 'model.safetensors'). Loading weights using safetensors.
+12/29/2025 04:18:04 - INFO: Loading pretrained weights from Hugging Face hub (timm/twins_svt_large.in1k)
+12/29/2025 04:18:05 - INFO: [timm/twins_svt_large.in1k] Safe alternative available for 'pytorch_model.bin' (as 'model.safetensors'). Loading weights using safetensors.
+12/29/2025 04:18:06 - INFO: Loading pretrained weights from Hugging Face hub (timm/twins_svt_large.in1k)
+12/29/2025 04:18:06 - INFO: [timm/twins_svt_large.in1k] Safe alternative available for 'pytorch_model.bin' (as 'model.safetensors'). Loading weights using safetensors.
+12/29/2025 04:18:21 - INFO: Loading pretrained weights from Hugging Face hub (timm/twins_svt_large.in1k)
+12/29/2025 04:18:21 - INFO: [timm/twins_svt_large.in1k] Safe alternative available for 'pytorch_model.bin' (as 'model.safetensors'). Loading weights using safetensors.
+12/29/2025 04:18:22 - INFO: Loading pretrained weights from Hugging Face hub (timm/twins_svt_large.in1k)
+12/29/2025 04:18:23 - INFO: [timm/twins_svt_large.in1k] Safe alternative available for 'pytorch_model.bin' (as 'model.safetensors'). Loading weights using safetensors.
+12/29/2025 06:15:34 - INFO: Loading pretrained weights from Hugging Face hub (timm/twins_svt_large.in1k)
+12/29/2025 06:15:35 - INFO: [timm/twins_svt_large.in1k] Safe alternative available for 'pytorch_model.bin' (as 'model.safetensors'). Loading weights using safetensors.
+12/29/2025 06:15:36 - INFO: Loading pretrained weights from Hugging Face hub (timm/twins_svt_large.in1k)
+12/29/2025 06:15:36 - INFO: [timm/twins_svt_large.in1k] Safe alternative available for 'pytorch_model.bin' (as 'model.safetensors'). Loading weights using safetensors.
+12/29/2025 07:42:15 - INFO: Loading pretrained weights from Hugging Face hub (timm/twins_svt_large.in1k)
+12/29/2025 07:42:15 - INFO: [timm/twins_svt_large.in1k] Safe alternative available for 'pytorch_model.bin' (as 'model.safetensors'). Loading weights using safetensors.
+12/29/2025 07:42:16 - INFO: Loading pretrained weights from Hugging Face hub (timm/twins_svt_large.in1k)
+12/29/2025 07:42:17 - INFO: [timm/twins_svt_large.in1k] Safe alternative available for 'pytorch_model.bin' (as 'model.safetensors'). Loading weights using safetensors.
+12/29/2025 09:11:22 - INFO: Loading pretrained weights from Hugging Face hub (timm/twins_svt_large.in1k)
+12/29/2025 09:11:22 - INFO: [timm/twins_svt_large.in1k] Safe alternative available for 'pytorch_model.bin' (as 'model.safetensors'). Loading weights using safetensors.
+12/29/2025 09:11:23 - INFO: Loading pretrained weights from Hugging Face hub (timm/twins_svt_large.in1k)
+12/29/2025 09:11:24 - INFO: [timm/twins_svt_large.in1k] Safe alternative available for 'pytorch_model.bin' (as 'model.safetensors'). Loading weights using safetensors.
+12/29/2025 10:37:34 - INFO: Loading pretrained weights from Hugging Face hub (timm/twins_svt_large.in1k)
+12/29/2025 10:37:35 - INFO: [timm/twins_svt_large.in1k] Safe alternative available for 'pytorch_model.bin' (as 'model.safetensors'). Loading weights using safetensors.
+12/29/2025 10:37:36 - INFO: Loading pretrained weights from Hugging Face hub (timm/twins_svt_large.in1k)
+12/29/2025 10:37:36 - INFO: [timm/twins_svt_large.in1k] Safe alternative available for 'pytorch_model.bin' (as 'model.safetensors'). Loading weights using safetensors.
+12/29/2025 10:38:05 - INFO: Loading pretrained weights from Hugging Face hub (timm/twins_svt_large.in1k)
+12/29/2025 10:38:06 - INFO: [timm/twins_svt_large.in1k] Safe alternative available for 'pytorch_model.bin' (as 'model.safetensors'). Loading weights using safetensors.
+12/29/2025 10:38:07 - INFO: Loading pretrained weights from Hugging Face hub (timm/twins_svt_large.in1k)
+12/29/2025 10:38:07 - INFO: [timm/twins_svt_large.in1k] Safe alternative available for 'pytorch_model.bin' (as 'model.safetensors'). Loading weights using safetensors.
+12/29/2025 10:38:39 - INFO: Loading pretrained weights from Hugging Face hub (timm/twins_svt_large.in1k)
+12/29/2025 10:38:39 - INFO: [timm/twins_svt_large.in1k] Safe alternative available for 'pytorch_model.bin' (as 'model.safetensors'). Loading weights using safetensors.
+12/29/2025 10:38:41 - INFO: Loading pretrained weights from Hugging Face hub (timm/twins_svt_large.in1k)
+12/29/2025 10:38:41 - INFO: [timm/twins_svt_large.in1k] Safe alternative available for 'pytorch_model.bin' (as 'model.safetensors'). Loading weights using safetensors.

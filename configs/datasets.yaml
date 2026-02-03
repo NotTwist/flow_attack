@@ -24,3 +24,11 @@ datasets:
     has_gt: false
     n_images: -1
     frames: 2
+  
+  carla:
+    root: "/mnt/ssd1/28s_mur/datasets/carla_dataset"
+    split: "eval"
+    has_gt: false
+    frames: 2
+    camera_config: "camera_config.json"
+    n_images: -1

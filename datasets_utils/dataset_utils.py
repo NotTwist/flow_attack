@@ -163,6 +163,8 @@ def prepare_dataloader(mode='training', dataset_name='Sintel', shuffle=False, ba
         dataset = datasets.KITTI(**dataset_args)
     elif dataset_name == 'Demo':
         dataset = datasets.Demo(**dataset_args)
+    elif dataset_name == 'carla':
+        dataset = datasets.Carla(**dataset_args)
     else:
         raise ValueError(f"Unknown dataset {dataset_name}.")
 
@@ -177,4 +179,13 @@ def prepare_dataloader(mode='training', dataset_name='Sintel', shuffle=False, ba
     # Create DataLoader
     dataloader = DataLoader(
         dataset, batch_size=batch_size, shuffle=shuffle)
+    
+    if small_run:
+        # If using Subset, we need to access the original dataset via .dataset
+        base_ds = dataset.dataset
+    else:
+        base_ds = dataset
+
+    dataloader.image_size = (base_ds.image_x_dim, base_ds.image_y_dim)
+
     return dataloader, ds_has_gt

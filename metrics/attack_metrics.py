@@ -11,6 +11,7 @@ import cv2 as cv
 from scipy.stats import pearsonr, spearmanr
 import torch
 import torch.nn.functional as F
+import matplotlib.pyplot as plt
 
 class AttackMetricsTracker:
     def __init__(self, output_dir="experiment_data", experiment_name="attack_experiment", run_name=None, args=None, train=False):
@@ -45,6 +46,7 @@ class AttackMetricsTracker:
         # mlflow.log_param("saved_iterations", args.save_iterations)
         # if args.target_layer:
         #     mlflow.log_param("target_layer", args.target_layer)
+        self.class_winning_frames = {}
 
         # Store save_iterations as a list of steps
         # Ensure it’s a list
@@ -293,7 +295,7 @@ class AttackMetricsTracker:
             "ase_target_attack": ase_target_attack
         }
 
-    def compute_iou(self, pred_seg, gt_seg, num_classes, mask=None):
+    def compute_iou(self, pred_seg, gt_seg, num_classes, mask=None,  targeted=False, classes=[13, 17]):
         """
         Compute mean IoU for semantic segmentation.
 
@@ -324,7 +326,30 @@ class AttackMetricsTracker:
         B = pred_seg.shape[0]
         ious = []
 
+        # compute iou for semantically similar classes
+        if targeted:
+            max_iou = -1
+            for cls in classes:
+                pred_cls = (pred_seg == cls)
+
+
+                if mask is not None:
+                    pred_cls = pred_cls & mask
+
+                intersection = pred_cls.sum()
+                union = mask.sum()
+                # print(intersection, union)
+                # Ignore classes that do not appear in GT
+                if union == 0:
+                    continue
+                iou = intersection / union if union > 0 else 0
+
+                max_iou = max(max_iou, iou)
+        
+            return max_iou
+        
         for cls in range(num_classes):
+                
             # Boolean masks for this class
             pred_cls = (pred_seg == cls)
             gt_cls = (gt_seg == cls)
@@ -347,6 +372,123 @@ class AttackMetricsTracker:
 
         return float(np.mean(ious))
 
+
+    def log_semantic_drift(self, attacked_seg, target_seg, mask=None):
+        if torch.is_tensor(attacked_seg):
+            attacked_seg = attacked_seg.detach().cpu().numpy()
+        if torch.is_tensor(target_seg):
+            target_seg = target_seg.detach().cpu().numpy()
+        if mask is not None and torch.is_tensor(mask):
+            mask = mask.detach().cpu().numpy().astype(bool)
+
+        if attacked_seg.ndim == 4:
+            attacked_seg = attacked_seg.squeeze()
+        if target_seg.ndim == 4:
+            target_seg = target_seg.squeeze()
+        if mask is not None:
+            if mask.ndim == 4:
+                mask = mask.squeeze()
+            
+            # Проверка на случай, если squeeze убрал слишком много (для batch_size=1)
+            # Нам нужно, чтобы форма была как минимум (H, W)
+            if mask.shape != attacked_seg.shape:
+                # Если формы всё еще разные, пробуем принудительно подогнать маску под сегментацию
+                # (актуально, если маска была [1, H, W], а сегментация [H, W])
+                mask = mask.reshape(attacked_seg.shape)
+
+        # Список имен классов для Cityscapes
+        class_names = [
+            "road", "sidewalk", "building", "wall", "fence",
+            "pole", "traffic light", "traffic sign", "vegetation",
+            "terrain", "sky", "person", "rider", "car", "truck",
+            "bus", "train", "motorcycle", "bicycle"
+        ]
+
+        # Ограничиваем область маской (патчем)
+        if mask is not None:
+            attacked_area = attacked_seg[mask]
+            target_area = target_seg[mask]
+        else:
+            attacked_area = attacked_seg.flatten()
+            target_area = target_seg.flatten()
+
+        unique_classes = np.unique(attacked_area)
+        
+        best_iou = -1.0
+        winning_class_id = None
+
+        # Ищем класс с максимальным IoU относительно цели в этом кадре
+        for cls in range(0,19):
+            intersection = (attacked_area == cls).sum()
+            union = attacked_area.size  # Весь патч — это наш целевой объем
+            
+            iou = intersection / union if union > 0 else 0
+            
+            if iou > best_iou:
+                best_iou = iou
+                winning_class_id = cls
+                iou = intersection / union if union > 0 else 0
+                
+                if iou > best_iou:
+                    best_iou = iou
+                    winning_class_id = cls
+
+        # --- Вывод в консоль ---
+        if winning_class_id is not None:
+            # Получаем имя класса или выводим ID, если индекс вне списка
+            class_name = class_names[int(winning_class_id)] if int(winning_class_id) < len(class_names) else f"ID {winning_class_id}"
+            
+            # self.count обычно инкрементируется в методе update, 
+            # используйте его как номер текущего кадра
+            # print(f"[Frame {self.count}] Winning Attack Class: {class_name} (IoU: {best_iou:.4f}), {unique_classes}")
+            
+            # Сохраняем для итоговой гистограммы
+            self.class_winning_frames[winning_class_id] = self.class_winning_frames.get(winning_class_id, 0) + 1
+    
+    def plot_attack_histogram(self):
+        if not self.class_winning_frames:
+            return
+
+        class_names_map = [
+            "road", "sidewalk", "building", "wall", "fence",
+            "pole", "traffic light", "traffic sign", "vegetation",
+            "terrain", "sky", "person", "rider", "car", "truck",
+            "bus", "train", "motorcycle", "bicycle"
+        ]
+
+        # Данные: какой класс чаще всего выигрывал по IoU
+        plot_data = []
+        for c_id, frame_count in self.class_winning_frames.items():
+            name = class_names_map[int(c_id)] if int(c_id) < len(class_names_map) else f"ID {c_id}"
+            # Для линии IoU можно оставить среднее значение IoU этого класса, когда он выигрывал
+            plot_data.append((name, frame_count))
+
+        # Сортировка по количеству кадров
+        plot_data.sort(key=lambda x: x[1], reverse=True)
+
+        names = [x[0] for x in plot_data]
+        counts = [x[1] for x in plot_data]
+
+        fig, ax1 = plt.subplots(figsize=(14, 7))
+
+        # Столбцы — количество кадров
+        ax1.bar(names, counts, color='lightcoral', alpha=0.8, label='Frames where Class won IoU')
+        ax1.set_xlabel('Class Name')
+        ax1.set_ylabel('Number of Frames', color='darkred')
+        ax1.tick_params(axis='y', labelcolor='darkred')
+        plt.xticks(rotation=45, ha='right')
+
+        plt.title('Semantic Drift Analysis: Most Successful Classes per Frame')
+        
+        # Добавим сетку для удобства счета кадров
+        ax1.grid(axis='y', linestyle='--', alpha=0.7)
+        
+        fig.tight_layout()
+        hist_path = os.path.join(self.output_dir, f"semantic_drift_{self.count}.png")
+        plt.savefig(hist_path)
+        mlflow.log_artifact(hist_path)
+        plt.close()
+        
     def update(self, original_flow, attacked_flow, original_img=None, second_img=None, gt_flow=None, target_flow=None, inverse_flow=None, mask=None, valid=None, tracked_flows=None, original_depth=None, attacked_depth=None, target_depth=None, tracked_depths=None, original_seg=None, attacked_seg=None, target_seg=None, tracked_segs=None):
         """Update metrics for the current batch."""
         aee_attack = self.compute_aee(original_flow, attacked_flow, mask)
@@ -397,13 +539,15 @@ class AttackMetricsTracker:
             num_classes = int(max(original_seg.max(), attacked_seg.max(), target_seg.max()) + 1)
 
             iou_init = self.compute_iou(original_seg, attacked_seg, num_classes, mask)
-            iou_target = self.compute_iou(attacked_seg, target_seg, num_classes, mask)
+            iou_target = self.compute_iou(attacked_seg, target_seg, num_classes, mask, targeted=True, classes=[13])
 
             mlflow.log_metric("iou_init_attack", iou_init, step=self.count)
             mlflow.log_metric("iou_target_attack", iou_target, step=self.count)
 
             self.cumulative_metrics["iou_init_attack"] += iou_init
             self.cumulative_metrics["iou_target_attack"] += iou_target
+            
+            self.log_semantic_drift(attacked_seg, target_seg, mask)
 
         # Update cumulative metrics
         self.cumulative_metrics["aee_init_attack"] += aee_attack
@@ -495,6 +639,7 @@ class AttackMetricsTracker:
                         mlflow.log_metric(step_key, v, step=self.count)
                         
         self.save_mean_metrics(step=self.count)
+        
     def get_mean_metrics(self):
         """
         Compute mean metrics over all batches.
@@ -563,6 +708,8 @@ class AttackMetricsTracker:
             save_depth(artifact, artifact_path)
         elif artifact_type == 'ss':
             save_segmentation(artifact, artifact_path)
+        elif artifact_type == 'patch':
+            artifact.save_png(artifact_path)
         mlflow.log_artifact(artifact_path)
         # print(f"Artifact saved to {artifact_path}")
 
@@ -588,6 +735,8 @@ class AttackMetricsTracker:
             print("MLflow run ended.")
         except Exception as e:
             print("mlflow.end_run() failed:", e)
+            
+        self.plot_attack_histogram()
             
     def save_flow(self, flow):
         flow = flow.permute(1, 2, 0)  # change from CHW to HWC shape

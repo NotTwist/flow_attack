@@ -26,7 +26,7 @@ def parse_args():
                         'zero', 'neg_flow', 'untargeted', 'camera', 'scene', 'down'], help="Choose a target for an attack")
 
     # Dataset selection argument
-    parser.add_argument('--dataset', type=str, default='Kitti15', choices=['Kitti15', 'Sintel'],
+    parser.add_argument('--dataset', type=str, default='Kitti15', choices=['Kitti15', 'Sintel', 'carla'],
                         help="Dataset to use for evaluation.")
 
     # Small run argument (for debugging purposes)

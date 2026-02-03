@@ -198,10 +198,11 @@ def train_patch_ptlflow(
     elif args.defense == "ilp":
         D = ILP(args.k, args.o, args.t, args.s, args.r, "forward")
 
-    # targets & losses
+    # targets & losses for optical flow
     flow_target_fn = get_target(args.target)
     flow_loss_fn = get_loss(args.loss, untargeted=args.target == 'untargeted')
 
+    # targets and losses for mde
     if args.attack_mde:
         mde_loss_fn = get_mde_loss(untargeted=args.mde_target == 'untargeted')
         mde_target_fn = get_mde_target(
@@ -216,6 +217,8 @@ def train_patch_ptlflow(
         mde_loss_fn = None
         mde_target_fn = None
 
+
+    # targets and losses for semantic segmentation
     if args.attack_ss:
         ss_loss_fn = get_ss_loss(untargeted=args.ss_target == 'untargeted')
         ss_target_fn = get_ss_target(args.ss_target)
@@ -225,7 +228,7 @@ def train_patch_ptlflow(
 
     flow_w, mde_w, ss_w = args.loss_weights
 
-    # коэффициенты для outside-consistency (можно добавить в args)
+    # коэффициенты для outside-consistency 
     flow_cons_w = getattr(args, "flow_cons_w", 0)
     mde_cons_w = getattr(args, "mde_cons_w", 0)
     ss_cons_w = getattr(args, "ss_cons_w", 0)
@@ -262,7 +265,7 @@ def train_patch_ptlflow(
                         'valids': valids_list}
             )
 
-    # замораживаем модели
+    # prepare models
     model.eval()
     for p in model.parameters():
         p.requires_grad = False
@@ -372,7 +375,6 @@ def train_patch_ptlflow(
                 #         (B_flow, 1, H_flow, W_flow), device=device, dtype=torch.float32
                 #     )
 
-                # --- маска патча в координатах flow ---
                 if M_batch is not None and M_batch.dim() == 4 and M_batch.shape[1] == 1:
                     M_flow_patch = torch.nn.functional.interpolate(
                         M_batch, size=(H_flow, W_flow), mode='nearest'
@@ -552,6 +554,9 @@ def train_patch_ptlflow(
         # save patch
         A.save_png(op.join(
             args.output_dir, f"patch_{metrics_tracker.run_name}_{epoch+1}.png"))
+        if metrics_tracker is not None and args.save_artifacts:
+                metrics_tracker.save_artifact(
+                    A, f"{epoch+1}_patch", artifact_type="patch")
         print(f"Saved patch for epoch {epoch+1}")
 
     return A

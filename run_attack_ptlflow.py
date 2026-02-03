@@ -19,17 +19,27 @@ from utils.targets import get_mde_target
 
 def load_model(model_name, dataset):
     model_ref = ptlflow.get_model_reference(model_name)
-    checkpoints = model_ref.pretrained_checkpoints.keys()
-    print(checkpoints)
+    print(model_ref)
+
+    # --- fallback-safe checkpoint discovery ---
+    if hasattr(model_ref, "pretrained_checkpoints"):
+        checkpoints = list(model_ref.pretrained_checkpoints.keys())
+        print("Checkpoints from model_ref:", checkpoints)
+    else:
+        return ptlflow.get_model(model_name)
+
+    # --- dataset match ---
     for c in checkpoints:
-        if c in dataset:
-            model = ptlflow.get_model(model_name, c)
-            return model
-        else:
-            print(f"Using checkpoint from other dataset!: {c}")
-            model = ptlflow.get_model(model_name, c)
-            return model
-    print(f"No pre-trained model available for {model}/{dataset}.")
+        if c.lower() in dataset.lower():
+            print(f"Using checkpoint: {c}")
+            return ptlflow.get_model(model_name, c)
+
+    # --- fallback: first available checkpoint ---
+    if checkpoints:
+        print(f"Using checkpoint from other dataset!: {checkpoints[0]}")
+        return ptlflow.get_model(model_name, checkpoints[0])
+
+    print(f"No pre-trained model available for {model_name}/{dataset}.")
     return None
 
 
@@ -45,7 +55,7 @@ def main():
     # Prepare data loader
     data_loader, has_gt = prepare_dataloader(
         dataset_name=args.dataset, small_run=args.small_run)
-
+    image_size = data_loader.image_size
     
     # Отдельный loader только для оценки перцентиля глубины
     depth_loader, _ = prepare_dataloader(
@@ -54,9 +64,7 @@ def main():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Setting Device to {device}\n")
 
-    # Import and load the model
-    # Get available checkpoints for a specific model (e.g., RAFT)
-    
+    # Import and load optical flow model    
     model = load_model(args.model_name, args.dataset.lower()).to(device)
     model.eval()
     
