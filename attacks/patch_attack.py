@@ -16,6 +16,8 @@ from .DetectionDefenses.helper_functions.patch_adversary import PatchAdversary
 import sys
 import pathlib
 from datasets_utils.dataset_utils import prepare_dataloader
+from defenses.temporal_filter import TemporalPredictionFilter
+
 sys.path.append(str(pathlib.Path(__file__).resolve().parent))
 
 
@@ -197,7 +199,26 @@ def train_patch_ptlflow(
         D = LGS(args.k, args.o, args.t, args.s, "forward")
     elif args.defense == "ilp":
         D = ILP(args.k, args.o, args.t, args.s, args.r, "forward")
+    
 
+    temporal_mode_map = {
+        'temporal-avg': 'average',
+        'temporal-median': 'median',
+        'temporal-bilateral': 'bilateral',
+        'temporal-domain-transform': 'domain_transform'
+    }
+
+    TF_flow = None
+    TF_mde = None
+    TF_ss = None
+
+    temporal_modes = ["temporal-avg", "temporal-median", "temporal-bilateral", "temporal-domain-transform"]
+    if args.defense in temporal_modes:
+        mode = temporal_mode_map[args.defense]
+        # Создаем фильтры (параметры можно брать общие или разные из args)
+        TF_flow = TemporalPredictionFilter(mode=mode, window_size=args.temp_window, sigma_color=args.sigma_color).to(device)
+        TF_mde = TemporalPredictionFilter(mode=mode, window_size=args.temp_window, sigma_color=args.sigma_color).to(device)
+        TF_ss = TemporalPredictionFilter(mode=mode, window_size=args.temp_window, sigma_color=args.sigma_color).to(device)
     # targets & losses for optical flow
     flow_target_fn = get_target(args.target)
     flow_loss_fn = get_loss(args.loss, untargeted=args.target == 'untargeted')
@@ -284,7 +305,10 @@ def train_patch_ptlflow(
 
     for epoch in range(args.n):
         print(f"Epoch {epoch+1}/{args.n}")
-
+        if TF_flow is not None:
+            TF_flow.reset()
+            TF_mde.reset()
+            TF_ss.reset()
         for batch_idx, (images, flow_gt, valid, meta, K) in enumerate(tqdm(data_loader)):
             images = images.to(device)          # [B,2,C,H,W]
             flow_gt = flow_gt.to(device)
@@ -346,6 +370,10 @@ def train_patch_ptlflow(
                 # --- forward through flow model ---
                 pred_attacked = model(attacked_inputs)['flows'].squeeze(0)
                 pred_unattacked = model(unattacked_inputs)['flows'].squeeze(0)
+
+                if TF_flow is not None:
+                    pred_attacked = TF_flow(pred_attacked, current_image=I1_att_def_batch)
+
                 H_flow, W_flow = pred_unattacked.shape[-2:]
                 B_flow = pred_attacked.shape[0]
 
@@ -412,6 +440,9 @@ def train_patch_ptlflow(
                     mde_pred_att = mde_model(attacked_inputs)
                     mde_pred_unatt = mde_model(unattacked_inputs)
 
+                    if TF_mde is not None:
+                        mde_pred_att = TF_mde(mde_pred_att, current_image=I1_att_def_batch)
+
                     if args.mde_target == 'scene':
                         mde_target_batch = mde_target_fn(
                             mde_pred_unatt, xs_batch, ys_batch + args.patch_size // 2
@@ -443,6 +474,10 @@ def train_patch_ptlflow(
                     ss_pred_att = ss_model(attacked_inputs, return_logits=True)
                     ss_pred_unatt = ss_model(
                         unattacked_inputs, return_logits=True)
+                    
+                    if TF_ss is not None:
+                        ss_pred_att = TF_ss(ss_pred_att, current_image=I1_att_def_batch)
+                    
                     ss_target_batch = ss_target_fn(ss_pred_unatt).to(device)
 
                     M_attack_ss = torch.nn.functional.interpolate(

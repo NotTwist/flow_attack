@@ -17,7 +17,7 @@ This repository contains code for generating adversarial attacks on optical flow
 
 ### Prerequisites
 
-- Python 3.8+
+- Python 3.12.2
 - CUDA 12.0+ (recommended for GPU acceleration)
 - pip or conda
 

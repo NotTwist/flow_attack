@@ -16,3 +16,5 @@ models/_pretrained_weights/
 models/models/MemFlow/ckpts
 experiment_data/
 mlruns/
+attacks/DetectionDefenses
+models/models/MeFlow

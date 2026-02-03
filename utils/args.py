@@ -127,7 +127,30 @@ def parse_args():
                         help="maximum delta for parameter update. Gradients will be clipped when using Projected Gradient Descent")
 
     parser.add_argument(
-        "--defense", dest="defense", default="none", help="Define defense", choices=['none', 'lgs', 'ilp'])
+        "--defense", dest="defense", default="none", help="Define defense", choices=['none', 'lgs', 'ilp', 'temporal-avg', 'temporal-median', 'temporal-bilateral', 'temporal-domain-transform'])
+
+
+    # --- Параметры временных (Temporal) фильтров ---
+    parser.add_argument(
+        "--temp_window", 
+        type=int, 
+        default=5, 
+        help="Size of the temporal window (number of frames to look back)"
+    )
+
+    parser.add_argument(
+        "--sigma_color", 
+        type=float, 
+        default=0.1, 
+        help="Range sigma for Bilateral/DomainTransform (color sensitivity). Lower = more edge preservation."
+    )
+
+    parser.add_argument(
+        "--sigma_spatial", 
+        type=float, 
+        default=30.0, 
+        help="Spatial/Temporal sigma for Domain Transform (smoothness strength)."
+    )
 
     parser.add_argument(
         "--k", dest="k", type=int, default=16, help="blocksize")
