@@ -454,7 +454,7 @@ def train_patch_ptlflow(
 
                     # маски в разрешении depth
                     M_attack_mde = torch.nn.functional.interpolate(
-                        M_attack_flow, size=mde_pred_att.shape[-2:], mode='nearest'
+                        M_attack_flow, size=mde_pred_att.shape[-    2:], mode='nearest'
                     )
                     M_outside_mde = 1.0 - M_attack_mde
 

@@ -139,6 +139,9 @@ class MpiSintel(FlowDataset):
             raise RuntimeWarning(
                 "No MPI Sintel data found at dataset root '%s'. Check the configuration file under helper_functions/config_paths.py and add the correct path to the MPI Sintel dataset." % root)
 
+    def __getitem__(self, index):
+        imgs, flow, valid, disp = super().__getitem__(index)
+        return imgs, flow, valid, disp, {} # Пустой конфиг вместо K
 
 class KITTI(FlowDataset):
     def __init__(self, aug_params=None, split='training', root=None, has_gt=False, frames=2, has_depth=True):
