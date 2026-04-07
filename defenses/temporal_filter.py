@@ -1,6 +1,7 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+import math
 
 class TemporalPredictionFilter(nn.Module):
     def __init__(self, mode='median', window_size=5, sigma_color=0.1, sigma_spatial=30.0):
@@ -105,3 +106,68 @@ class TemporalPredictionFilter(nn.Module):
         
         self.last_filtered_output = new_output
         return new_output
+    
+
+def init_temporal_filters(args, device):
+    """Инициализирует временные фильтры для защиты на основе аргументов."""
+    temporal_mode_map = {
+        'temporal-avg': 'average',
+        'temporal-median': 'median',
+        'temporal-bilateral': 'bilateral',
+        'temporal-domain-transform': 'domain_transform'
+    }
+    
+    temporal_modes = ["temporal-avg", "temporal-median", 
+                      "temporal-bilateral", "temporal-domain-transform"]
+    
+    filters = {
+        'flow': None,
+        'mde': None,
+        'ss': None,
+        'mode': None
+    }
+    
+    if args.defense in temporal_modes:
+        mode = temporal_mode_map[args.defense]
+        filters['mode'] = mode
+        
+        # Создаем фильтры для каждой модели
+        filters['flow'] = TemporalPredictionFilter(
+            mode=mode, 
+            window_size=args.temp_window, 
+            sigma_color=args.sigma_color
+        ).to(device)
+        
+        if args.attack_mde:
+            filters['mde'] = TemporalPredictionFilter(
+                mode=mode, 
+                window_size=args.temp_window, 
+                sigma_color=args.sigma_color
+            ).to(device)
+            
+        if args.attack_ss:
+            filters['ss'] = TemporalPredictionFilter(
+                mode=mode, 
+                window_size=args.temp_window, 
+                sigma_color=args.sigma_color
+            ).to(device)
+            
+            
+        print(f"Initialized temporal defense: {args.defense} "
+              f"(window={args.temp_window}, mode={mode})")
+    
+    return filters
+
+
+def apply_temporal_filters(filters, predictions, current_image, model_type='flow'):
+    """Применяет временные фильтры к предсказаниям моделей."""
+    if filters[model_type] is not None:
+        return filters[model_type](predictions, current_image)
+    return predictions
+
+
+def reset_temporal_filters(filters):
+    """Сбрасывает состояние всех временных фильтров."""
+    for key in ['flow', 'mde', 'ss']:
+        if filters[key] is not None:
+            filters[key].reset()

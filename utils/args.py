@@ -32,6 +32,8 @@ def parse_args():
     # Small run argument (for debugging purposes)
     parser.add_argument('--small_run', action='store_true',
                         help="Flag to run a smaller version of the dataset for testing purposes.")
+    parser.add_argument('--subset_size', type=int, default=0,
+                        help="Use a random subset of N images (0 = use all). More flexible than --small_run.")
 
     # Output directory for saving results
     parser.add_argument('--output_dir', type=str, default="experiment_data",
@@ -92,12 +94,34 @@ def parse_args():
 
     parser.add_argument(
         "--loss_weights",
-        nargs=3,                 # accept exactly 2 values
+        nargs=3,
         type=float,
-        # default weights: [optical_flow, mde, ss]
         default=[1.0, 0.1, 1.0],
         metavar=('FLOW_W', 'MDE_W', 'SS_W'),
         help="3 floats: weights for optical-flow, MDE and SS losses (e.g. --loss_weights 1.0 0.1 1.0)"
+    )
+
+    parser.add_argument(
+        "--weight_strategy",
+        type=str,
+        default="fixed",
+        choices=["fixed", "normalized", "minmax"],
+        help=("How to set per-task loss weights. "
+              "'fixed': use --loss_weights as constant wi (Eq.1 with wi=const); "
+              "'normalized': wi = user_weight / Li(x,y) on clean image (Eq.1 with wi=1/Li); "
+              "'minmax': APGDA from Guo et al. ICASSP 2025 — Algorithm 1, Eq.2-4")
+    )
+    parser.add_argument(
+        "--minmax_alpha_w",
+        type=float,
+        default=0.03,
+        help="Learning rate alpha2 for the inner weight update in min-max (Eq.4 in Guo et al.)"
+    )
+    parser.add_argument(
+        "--minmax_gamma",
+        type=float,
+        default=5.0,
+        help="Regularization coefficient gamma towards uniform weights (Eq.2 in Guo et al.)"
     )
 
     parser.add_argument("--attack_ss", action='store_true',
@@ -107,7 +131,10 @@ def parse_args():
                         help="Neural network model to use for semantic segmentation.")
 
     parser.add_argument('--ss_target', type=str, default='targeted',
-                        choices=['targeted', 'untargeted'], help="Choose a target for an mde attack")
+                        choices=['targeted', 'untargeted'], help="Choose a target for an ss attack")
+
+    parser.add_argument('--ss_focal_gamma', type=float, default=2.0,
+                        help="Focal loss gamma for SS. 0 = plain cross-entropy, >0 = focal loss (default: 2.0)")
 
 
     # patch attacks
@@ -176,6 +203,13 @@ def parse_args():
     parser.add_argument(
         "--y_scale",  type=float, default=1, help="patch scaling on y axis")
     parser.add_argument(
+        "--flow_shift", type=float, default=0,
+        help="Vertical pixel shift of patch between frame1 and frame2 "
+             "(simulates ego-motion). Positive = patch moves down in frame2.")
+    parser.add_argument(
+        "--flow_target_magnitude", type=float, default=1.0,
+        help="Magnitude of the 'down' flow target vector (default 1.0).")
+    parser.add_argument(
         "--tv_weight",
         type=float,
         default=0,
@@ -192,4 +226,5 @@ def parse_args():
     
     parser.add_argument("--plane_aug", action='store_true',
                         help='Attack SS model at the same time')
+
     return parser.parse_args()

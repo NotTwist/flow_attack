@@ -66,12 +66,16 @@ class AttackMetricsTracker:
             "gt_diff_error": 0.0,
             "reconstruction_error": 0.0,
             "aee_target_attack": 0.0,
+            "aee_clean_target": 0.0,
             "mde_rmse_init_attack": 0.0,
             "mde_rmse_target_attack": 0.0,
+            "mde_rmse_clean_target": 0.0,
             "ase_init_attack": 0.0,
             "ase_target_attack": 0.0, 
             "iou_init_attack": 0.0,
-            "iou_target_attack": 0.0
+            "iou_target_attack": 0.0,
+            # Mean of per-task target-distance ratios (lower ⇒ stronger targeted attack)
+            "multitask_robustness_score": 0.0,
         }
         self.count = 0
 
@@ -372,6 +376,79 @@ class AttackMetricsTracker:
 
         return float(np.mean(ious))
 
+    def compute_multitask_robustness_score(
+        self,
+        original_flow,
+        attacked_flow,
+        mask=None,
+        target_flow=None,
+        original_depth=None,
+        attacked_depth=None,
+        target_depth=None,
+        original_seg=None,
+        attacked_seg=None,
+        target_seg=None,
+    ):
+        """
+        Multi-task score: mean of per-task ratios «distance to attack target after attack»
+        divided by «distance to the same target on the clean prediction».
+
+        Per task (smaller ratio ⇒ prediction moved closer to the target, i.e. stronger attack):
+          - Flow:  AEE(f_adv, f_tgt) / max(ε, AEE(f_clean, f_tgt))
+          - Depth: RMSE(d_adv, d_tgt) / max(ε, RMSE(d_clean, d_tgt))
+          - Seg:   mean(seg_adv ≠ seg_tgt) / max(ε, mean(seg_clean ≠ seg_tgt))
+
+        Only tasks with all required tensors are included; the reported value is their mean.
+        """
+        eps = 1e-8
+        gammas = []
+
+        if (
+            original_flow is not None
+            and attacked_flow is not None
+            and target_flow is not None
+        ):
+            num = float(self.compute_aee(attacked_flow, target_flow, mask))
+            den = float(self.compute_aee(original_flow, target_flow, mask))
+            gammas.append(("flow", num / max(eps, den)))
+
+        if (
+            original_depth is not None
+            and attacked_depth is not None
+            and target_depth is not None
+        ):
+            rmse_adv = float(
+                self.compute_rmse(attacked_depth, target_depth, mask).mean().item()
+            )
+            rmse_clean = float(
+                self.compute_rmse(original_depth, target_depth, mask).mean().item()
+            )
+            gammas.append(("depth", rmse_adv / max(eps, rmse_clean)))
+
+        if (
+            original_seg is not None
+            and attacked_seg is not None
+            and target_seg is not None
+        ):
+            o = original_seg.detach().cpu().numpy() if torch.is_tensor(original_seg) else original_seg
+            a = attacked_seg.detach().cpu().numpy() if torch.is_tensor(attacked_seg) else attacked_seg
+            t = target_seg.detach().cpu().numpy() if torch.is_tensor(target_seg) else target_seg
+            if o.ndim == 4:
+                o = o.squeeze(0)
+            if a.ndim == 4:
+                a = a.squeeze(0)
+            if t.ndim == 4:
+                t = t.squeeze(0)
+            err_adv = float(np.mean(a != t))
+            err_clean = float(np.mean(o != t))
+            gammas.append(("seg", err_adv / max(eps, err_clean)))
+
+        if not gammas:
+            return None, {}
+
+        mrs = sum(g for _, g in gammas) / len(gammas)
+        gamma_dict = {name: g for name, g in gammas}
+        return mrs, gamma_dict
 
     def log_semantic_drift(self, attacked_seg, target_seg, mask=None):
         if torch.is_tensor(attacked_seg):
@@ -494,6 +571,11 @@ class AttackMetricsTracker:
         aee_attack = self.compute_aee(original_flow, attacked_flow, mask)
         aee_attack_target = self.compute_aee(
             attacked_flow, target_flow, mask)
+        aee_clean_target = (
+            self.compute_aee(original_flow, target_flow, mask)
+            if target_flow is not None
+            else 0.0
+        )
 
         aee_gt = self.compute_aee(
             original_flow, gt_flow, valid) if gt_flow is not None else 0.0
@@ -515,12 +597,33 @@ class AttackMetricsTracker:
         # MDE
         if original_depth is not None and attacked_depth is not None:
             mde_rmse_attack = self.compute_rmse(original_depth, attacked_depth, mask)
-            self.cumulative_metrics["mde_rmse_init_attack"] += mde_rmse_attack
-            mlflow.log_metric("mde_rmse_init_attack", mde_rmse_attack, step=self.count)
-            mde_rmse_attack_target = self.compute_rmse(attacked_depth, target_depth, mask)
-            self.cumulative_metrics["mde_rmse_target_attack"] += mde_rmse_attack_target
-            mlflow.log_metric("mde_rmse_target_attack", mde_rmse_attack_target, step=self.count)
-            
+            self.cumulative_metrics["mde_rmse_init_attack"] += float(
+                mde_rmse_attack.mean().item()
+            )
+            mlflow.log_metric(
+                "mde_rmse_init_attack",
+                float(mde_rmse_attack.mean().item()),
+                step=self.count,
+            )
+            mde_rmse_attack_target = self.compute_rmse(
+                attacked_depth, target_depth, mask
+            )
+            self.cumulative_metrics["mde_rmse_target_attack"] += float(
+                mde_rmse_attack_target.mean().item()
+            )
+            mlflow.log_metric(
+                "mde_rmse_target_attack",
+                float(mde_rmse_attack_target.mean().item()),
+                step=self.count,
+            )
+            if target_depth is not None:
+                mde_rmse_clean_target = self.compute_rmse(
+                    original_depth, target_depth, mask
+                )
+                v_ct = float(mde_rmse_clean_target.mean().item())
+                self.cumulative_metrics["mde_rmse_clean_target"] += v_ct
+                mlflow.log_metric("mde_rmse_clean_target", v_ct, step=self.count)
+
             pearson_corr, spearman_corr = self.compute_depth_correlation(original_depth, attacked_depth, mask)
             mlflow.log_metric("mde_pearson_init_attack",
                               pearson_corr, step=self.count)
@@ -549,18 +652,37 @@ class AttackMetricsTracker:
             
             self.log_semantic_drift(attacked_seg, target_seg, mask)
 
+        # Multi-task target-distance ratio (mean over tasks; lower ⇒ stronger attack)
+        mrs, mrs_gammas = self.compute_multitask_robustness_score(
+            original_flow,
+            attacked_flow,
+            mask,
+            target_flow=target_flow,
+            original_depth=original_depth,
+            attacked_depth=attacked_depth,
+            target_depth=target_depth,
+            original_seg=original_seg,
+            attacked_seg=attacked_seg,
+            target_seg=target_seg,
+        )
+        if mrs is not None:
+            self.cumulative_metrics["multitask_robustness_score"] += mrs
+
         # Update cumulative metrics
         self.cumulative_metrics["aee_init_attack"] += aee_attack
         self.cumulative_metrics["aee_init_gt"] += aee_gt
         self.cumulative_metrics["aee_attacked_gt"] += aee_attacked_gt
         self.cumulative_metrics["gt_diff_error"] += diff_error
         self.cumulative_metrics["aee_target_attack"] += aee_attack_target
+        self.cumulative_metrics["aee_clean_target"] += aee_clean_target
         self.count += 1
 
         # Log main metrics
         mlflow.log_metric("aee_init_attack", aee_attack, step=self.count)
         mlflow.log_metric("aee_target_attack",
                           aee_attack_target, step=self.count)
+        if target_flow is not None:
+            mlflow.log_metric("aee_clean_target", aee_clean_target, step=self.count)
 
         if gt_flow is not None:
             mlflow.log_metric("aee_init_gt", aee_gt, step=self.count)
@@ -568,6 +690,10 @@ class AttackMetricsTracker:
                               aee_attacked_gt, step=self.count)
             mlflow.log_metric("gt_diff_error", diff_error, step=self.count)
 
+        if mrs is not None:
+            mlflow.log_metric("multitask_robustness_score", mrs, step=self.count)
+            for task_name, g in mrs_gammas.items():
+                mlflow.log_metric(f"mrs_gamma_{task_name}", g, step=self.count)
 
         # Process dynamically defined iterations
         if self.saved_iterations:
@@ -660,26 +786,26 @@ class AttackMetricsTracker:
 
     def save_image(self, image, filename):
         if torch.is_tensor(image):
-            image = image.detach().cpu().numpy()
-            
+            image = image.detach().cpu().float().numpy()
+
             if image.ndim == 4:
                 image = image.squeeze(0)
-            if image.ndim == 3:
+            if image.ndim == 3 and image.shape[0] in (1, 3):
                 image = np.transpose(image, (1, 2, 0))
 
+        image = image.astype(np.float32)
 
-        # convert to bgr
-        image = cv2.cvtColor(image, cv2.COLOR_RGB2BGR)
+        if image.ndim == 2:
+            image = image[:, :, None]
+        if image.shape[2] == 1:
+            image = np.repeat(image, 3, axis=2)
 
-        # Check the min and max values
         min_val, max_val = image.min(), image.max()
         if min_val < 0.0 or max_val > 1.0:
-            # Если диапазон не [0,1], выполняем линейное масштабирование
-            # 1e-8 для защиты от деления на 0
             image = (image - min_val) / (max_val - min_val + 1e-8)
-            image = (image * 255).astype(np.uint8)
-        else:
-            image = (image * 255).astype(np.uint8)
+
+        image = (image * 255).clip(0, 255).astype(np.uint8)
+        image = cv2.cvtColor(image, cv2.COLOR_RGB2BGR)
         return cv2.imwrite(filename, image)
 
     def save_artifact(self, artifact, name, artifact_type: Literal["image", "flow", "tensor", "depth"] = "image"):
@@ -729,6 +855,11 @@ class AttackMetricsTracker:
             f"AEE (init vs attack): {mean_metrics.get('aee_init_attack', 'N/A'):.4f}")
         print(
             f"AEE (attacked vs target): {mean_metrics.get('aee_target_attack', 'N/A'):.4f}")
+        if "multitask_robustness_score" in mean_metrics:
+            print(
+                f"Multi-task target ratio (mean AEE/RMSE/seg-error to target vs clean; "
+                f"lower = stronger attack): {mean_metrics['multitask_robustness_score']:.4f}"
+            )
 
         try:
             mlflow.end_run()

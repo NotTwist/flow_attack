@@ -1,4 +1,5 @@
 import ptlflow
+from functools import partial
 from tqdm import tqdm
 import torch
 import torch.nn.functional as F
@@ -93,22 +94,21 @@ def scene_flow(flow, x, y):
     return value.expand_as(flow)
 
 
-def down_flow(flow):
+def down_flow(flow, magnitude=1.0):
     """Create flow vectors directed straight downward.
 
     Args:
         flow (torch.Tensor): shape (B, 2, H, W)
+        magnitude (float): magnitude of the downward flow vector
 
     Returns:
-        torch.Tensor: flow where u = 0, v = 1 (downward unit vectors)
+        torch.Tensor: flow where u = 0, v = magnitude
     """
     B, C, H, W = flow.shape
     device = flow.device
 
-    # Горизонтальная компонента = 0
     u = torch.zeros((B, 1, H, W), device=device)
-    # Вертикальная компонента > 0 — вниз
-    v = torch.ones((B, 1, H, W), device=device)
+    v = torch.full((B, 1, H, W), magnitude, device=device)
 
     return torch.cat([u, v], dim=1)
 
@@ -265,7 +265,7 @@ def get_ss_target(target_name='untargeted'):
     return target
 
 
-def get_target(target_name, custom_target_path="", device=None):
+def get_target(target_name, custom_target_path="", device=None, magnitude=1.0):
     """Getter method which yields a specified target flow used during PCFA 
 
     Args:
@@ -276,6 +276,7 @@ def get_target(target_name, custom_target_path="", device=None):
             custom_target_path (str, optional):
                     if custom target is desired provide the path to a .npy perturbation file. Defaults to "".
             device (_type_, optional): _description_. Defaults to None.
+            magnitude (float): magnitude for directional targets (e.g. 'down').
 
     Raises:
             ValueError: Undefined choice for target.
@@ -294,7 +295,7 @@ def get_target(target_name, custom_target_path="", device=None):
     elif target_name == 'scene':
         target = scene_flow
     elif target_name == 'down':
-        target = down_flow
+        target = partial(down_flow, magnitude=magnitude)
     else:
         raise ValueError('The specified target type "' + target_name +
                          '" is not defined and cannot be used. Select one of "zero", "neg_flow" or "custom". Aborting.')

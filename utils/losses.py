@@ -640,8 +640,11 @@ def get_mde_loss(f_type=None, untargeted: bool = False) -> Callable:
 
 def ss_base_loss(logits, target, mask=None, gamma=2.0):
     ce = F.cross_entropy(logits, target, reduction='none')
-    pt = torch.exp(-ce)
-    loss = ((1-pt)**gamma * ce)
+    if gamma > 0:
+        pt = torch.exp(-ce)
+        loss = ((1 - pt) ** gamma) * ce
+    else:
+        loss = ce
     if mask is not None:
         loss = (loss * mask).sum() / mask.sum().clamp_min(1e-6)
     else:
@@ -649,21 +652,21 @@ def ss_base_loss(logits, target, mask=None, gamma=2.0):
     return loss
 
 
-def get_ss_loss(untargeted: bool = False) -> Callable:
+def get_ss_loss(untargeted: bool = False, gamma: float = 2.0) -> Callable:
     """
     Возвращает loss-функцию для semantic segmentation.
+    gamma: focal loss gamma. 0 = plain cross-entropy, >0 = focal loss.
     Если untargeted=True → loss будет инвертирован (используется для untargeted атак).
-    Если untargeted=False → обычный положительный loss (используется для targeted атак).
     """
-    base_loss = ss_base_loss
+    def loss_fn(logits, target, mask=None):
+        return ss_base_loss(logits, target, mask=mask, gamma=gamma)
 
     if not untargeted:
-        return base_loss
+        return loss_fn
 
-    @wraps(base_loss)
+    @wraps(loss_fn)
     def neg_loss(*args, **kwargs):
-        # Инвертируем знак, чтобы оптимизатор "усиливал" ошибку модели.
-        return - base_loss(*args, **kwargs)
+        return -loss_fn(*args, **kwargs)
 
     neg_loss._negated = True
     return neg_loss

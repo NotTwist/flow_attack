@@ -1,4 +1,5 @@
 #!/bin/bash
+cd "$(dirname "$0")/.."
 
 # List of epsilon values to test
 num_samples=("1" "2" "3" "4" "5" "6")
@@ -7,7 +8,7 @@ epsilons=("1./255." "2./255." "4./255." "8./255.")
 for epsilon in "${epsilons[@]}"; do
   for sample in "${num_samples[@]}"; do
     echo "Running VMIFGSM attack with num_samples=$sample and epsilon=$epsilon"
-    python run_attack_ptlflow.py \
+    python3 run_attack_ptlflow.py \
       --model_name raft \
       --attack_type VMIFGSM \
       --num_samples $sample \

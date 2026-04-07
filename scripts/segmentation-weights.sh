@@ -1,4 +1,5 @@
 #!/bin/bash
+cd "$(dirname "$0")/.."
 # constant epsilon (8/255)
 EPSILON=$(bc  <<< "scale=8; 8/255")
 
@@ -8,7 +9,7 @@ weights=(10.0 5.0 1.0 0.5 0.25 0.1 0.05 0.0)
 for FLOW_W in "${weights[@]}"; do
   echo "Running attack with semantic-segmentation=$FLOW_W, epsilon=$EPSILON"
 
-  python run_attack_ptlflow.py \
+  python3 run_attack_ptlflow.py \
     --small_run \
     --target zero \
     --saved_iterations 3 5 10 15 20 \

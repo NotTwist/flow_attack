@@ -521,6 +521,10 @@ def project_patch_on_scene(
     plane_aug=True,
     plane_aug_angle=5.0,
     road_class_id=0,
+    precomputed_depth=None,      # [B,1,H,W] – skip MDE forward if provided
+    precomputed_road_mask=None,  # [B,1,H,W] – skip SS forward if provided
+    precomputed_planes=None,     # list of (normal, d) – skip plane fitting if provided
+    flow_shift=0.0,
 ):
     """
     Универсальная функция проецирования патча A на дорожную плоскость
@@ -529,6 +533,11 @@ def project_patch_on_scene(
         - semantic segmentation mask (road region)
         - plane tilt augmentation
         - patch projection PatchAdversary(A)
+
+    Precomputed arguments can be supplied to skip the corresponding
+    model forward passes and plane fitting (useful when calling this
+    function multiple times on the same clean batch, e.g. inside an
+    inner optimisation loop).
 
     Возвращает:
         I1_p_batch, I2_p_batch  — изображения с патчем
@@ -541,9 +550,11 @@ def project_patch_on_scene(
     B = I1_batch.shape[0]
 
     # ---------------------------------------------------------
-    # 1. Compute depth via MDE model
+    # 1. Compute depth via MDE model (skip if precomputed)
     # ---------------------------------------------------------
-    if mde_model is not None:
+    if precomputed_depth is not None:
+        depth_pred = precomputed_depth
+    elif mde_model is not None:
         inp = io_adapter.prepare_inputs(
             inputs={'images': torch.stack([I1_batch, I2_batch], dim=1)}
         )
@@ -567,9 +578,11 @@ def project_patch_on_scene(
         depth_pred = None
 
     # ---------------------------------------------------------
-    # 2. Compute road mask from segmentation model (optional)
+    # 2. Compute road mask from segmentation model (skip if precomputed)
     # ---------------------------------------------------------
-    if ss_model is not None:
+    if precomputed_road_mask is not None:
+        road_mask = precomputed_road_mask
+    elif ss_model is not None:
         inp = io_adapter.prepare_inputs(
             inputs={'images': torch.stack([I1_batch, I2_batch], dim=1)}
         )
@@ -583,9 +596,11 @@ def project_patch_on_scene(
         road_mask = None
 
     # ---------------------------------------------------------
-    # 3. Fit plane from depth
+    # 3. Fit plane from depth (skip if precomputed)
     # ---------------------------------------------------------
-    if depth_pred is not None:
+    if precomputed_planes is not None:
+        planes = precomputed_planes
+    elif depth_pred is not None:
         planes = fit_plane_from_depth(depth_pred, K, road_mask)
     else:
         planes = None  # still allow PatchAdversary to run (flat projection)
@@ -604,10 +619,12 @@ def project_patch_on_scene(
             I1_batch, I2_batch,
             K=K,
             planes=planes,
-            road_masks=road_mask
+            road_masks=road_mask,
+            flow_shift=flow_shift,
         )
     else:
-        I1_p, I2_p, M_batch, ys_batch, xs_batch = A(I1_batch, I2_batch)
+        I1_p, I2_p, M_batch, ys_batch, xs_batch = A(
+            I1_batch, I2_batch, flow_shift=flow_shift)
 
     return (
         I1_p,       # patched I1

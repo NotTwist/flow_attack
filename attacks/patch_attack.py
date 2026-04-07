@@ -23,6 +23,24 @@ sys.path.append(str(pathlib.Path(__file__).resolve().parent))
 
 
 
+def project_simplex(v, z=1.0):
+    """Project vector v onto the z-simplex: w >= 0, sum(w) = z.
+
+    Implements the algorithm from Duchi et al., ICML 2008.
+    """
+    with torch.no_grad():
+        v = v.view(-1)
+        n = v.shape[0]
+        if n == 1:
+            return torch.full_like(v, z)
+        mu, _ = torch.sort(v, descending=True)
+        cumsum = torch.cumsum(mu, dim=0)
+        j = torch.arange(1, n + 1, dtype=v.dtype, device=v.device)
+        rho = int((mu * j - cumsum + z > 0).sum().item()) - 1
+        theta = (cumsum[rho] - z) / (rho + 1.0)
+        return torch.clamp(v - theta, min=0.0)
+
+
 def total_variation_loss(patch, tv_weight=1e-4):
     """
     patch: [C, H, W] or [B,C,H,W]
@@ -175,7 +193,8 @@ def train_patch_ptlflow(
     ).to(device)
 
     depth_loader, _ = prepare_dataloader(
-        dataset_name=args.dataset, small_run=args.small_run)
+        dataset_name=args.dataset, small_run=args.small_run,
+        subset_size=getattr(args, 'subset_size', 0))
 
     # optimizer
     if args.optimizer == "adam":
@@ -208,19 +227,19 @@ def train_patch_ptlflow(
         'temporal-domain-transform': 'domain_transform'
     }
 
-    TF_flow = None
-    TF_mde = None
-    TF_ss = None
+    # TF_flow = None
+    # TF_mde = None
+    # TF_ss = None
 
-    temporal_modes = ["temporal-avg", "temporal-median", "temporal-bilateral", "temporal-domain-transform"]
-    if args.defense in temporal_modes:
-        mode = temporal_mode_map[args.defense]
-        # Создаем фильтры (параметры можно брать общие или разные из args)
-        TF_flow = TemporalPredictionFilter(mode=mode, window_size=args.temp_window, sigma_color=args.sigma_color).to(device)
-        TF_mde = TemporalPredictionFilter(mode=mode, window_size=args.temp_window, sigma_color=args.sigma_color).to(device)
-        TF_ss = TemporalPredictionFilter(mode=mode, window_size=args.temp_window, sigma_color=args.sigma_color).to(device)
+    # temporal_modes = ["temporal-avg", "temporal-median", "temporal-bilateral", "temporal-domain-transform"]
+    # if args.defense in temporal_modes:
+    #     mode = temporal_mode_map[args.defense]
+    #     # Создаем фильтры (параметры можно брать общие или разные из args)
+    #     TF_flow = TemporalPredictionFilter(mode=mode, window_size=args.temp_window, sigma_color=args.sigma_color).to(device)
+    #     TF_mde = TemporalPredictionFilter(mode=mode, window_size=args.temp_window, sigma_color=args.sigma_color).to(device)
+    #     TF_ss = TemporalPredictionFilter(mode=mode, window_size=args.temp_window, sigma_color=args.sigma_color).to(device)
     # targets & losses for optical flow
-    flow_target_fn = get_target(args.target)
+    flow_target_fn = get_target(args.target, magnitude=args.flow_target_magnitude)
     flow_loss_fn = get_loss(args.loss, untargeted=args.target == 'untargeted')
 
     # targets and losses for mde
@@ -241,13 +260,38 @@ def train_patch_ptlflow(
 
     # targets and losses for semantic segmentation
     if args.attack_ss:
-        ss_loss_fn = get_ss_loss(untargeted=args.ss_target == 'untargeted')
+        ss_loss_fn = get_ss_loss(
+            untargeted=args.ss_target == 'untargeted',
+            gamma=getattr(args, 'ss_focal_gamma', 2.0)
+        )
         ss_target_fn = get_ss_target(args.ss_target)
     else:
         ss_loss_fn = None
         ss_target_fn = None
 
-    flow_w, mde_w, ss_w = args.loss_weights
+    flow_w_init, mde_w_init, ss_w_init = args.loss_weights
+
+    weight_strategy = getattr(args, "weight_strategy", "fixed")
+
+    # Build the list of *active* task indices (only tasks that are actually
+    # attacked contribute to the dynamic weight vector).
+    active_tasks = ["flow"]
+    if args.attack_mde and mde_model is not None:
+        active_tasks.append("mde")
+    if args.attack_ss and ss_model is not None:
+        active_tasks.append("ss")
+    n_tasks = len(active_tasks)
+
+    # For 'fixed' strategy the weights never change.
+    flow_w, mde_w, ss_w = flow_w_init, mde_w_init, ss_w_init
+
+    # For 'minmax' strategy we maintain a weight vector on the probability
+    # simplex P = {w | sum(w)=1, w_i>=0}.  Algorithm 1, Guo et al. ICASSP 2025.
+    # Initialised to uniform w^(0) = 1/k as in the paper.
+    if weight_strategy == "minmax":
+        W = torch.ones(n_tasks, device=device) / n_tasks
+        alpha_w = getattr(args, "minmax_alpha_w", 0.03)   # α₂ in Eq.4
+        gamma_w = getattr(args, "minmax_gamma", 5.0)      # γ  in Eq.2
 
     # коэффициенты для outside-consistency 
     flow_cons_w = getattr(args, "flow_cons_w", 0)
@@ -303,12 +347,19 @@ def train_patch_ptlflow(
 
     mapping = None
 
+    tv_w = getattr(args, "tv_weight", 0.0)
+    nps_w = getattr(args, "nps_weight", 0.0)
+
     for epoch in range(args.n):
         print(f"Epoch {epoch+1}/{args.n}")
-        if TF_flow is not None:
-            TF_flow.reset()
-            TF_mde.reset()
-            TF_ss.reset()
+
+        epoch_accum = {
+            "loss": 0.0, "flow_adv": 0.0, "mde_adv": 0.0, "ss_adv": 0.0,
+            "flow_cons": 0.0, "mde_cons": 0.0, "ss_cons": 0.0,
+            "tv": 0.0, "nps": 0.0,
+        }
+        n_batches = 0
+
         for batch_idx, (images, flow_gt, valid, meta, K) in enumerate(tqdm(data_loader)):
             images = images.to(device)          # [B,2,C,H,W]
             flow_gt = flow_gt.to(device)
@@ -318,11 +369,120 @@ def train_patch_ptlflow(
 
             B = images.shape[0]
 
+            I1_batch = images[:, 0, :, :, :]  # [B,C,H_img,W_img]
+            I2_batch = images[:, 1, :, :, :]
+
+            # ------------------------------------------------------------------
+            # Pre-compute per-batch quantities that are invariant across the
+            # inner optimisation loop (unattacked predictions, depth, road mask,
+            # and plane fits all depend only on the clean images and don't change
+            # between inner steps).
+            # ------------------------------------------------------------------
+            _unatt_imgs = torch.stack([I1_batch, I2_batch], dim=1)
+            unattacked_inputs_cache = prepare_inputs_safe(
+                _unatt_imgs, flows_tensor=flow_gt, valids_tensor=valid)
+
+            with torch.no_grad():
+                pred_unattacked = model(unattacked_inputs_cache)['flows'].squeeze(0)
+
+                # MDE unattacked prediction (reused for loss and plane fitting)
+                mde_pred_unatt = None
+                if mde_model is not None and args.attack_mde:
+                    mde_pred_unatt = mde_model(unattacked_inputs_cache)
+
+                # SS unattacked prediction (reused for loss and road mask)
+                ss_pred_unatt = None
+                if ss_model is not None and args.attack_ss:
+                    ss_pred_unatt = ss_model(unattacked_inputs_cache, return_logits=True)
+
+                # Depth + road mask + planes for patch projection (computed once
+                # per batch; reused by project_patch_on_scene every inner step)
+                cached_depth = None
+                cached_road_mask = None
+                cached_planes = None
+                if args.patch_projection:
+                    if mde_model is not None:
+                        # Reuse mde_pred_unatt when available to avoid a 2nd forward pass
+                        _mde_raw = mde_pred_unatt if mde_pred_unatt is not None \
+                            else mde_model(unattacked_inputs_cache)
+                        if _mde_raw is not None:
+                            _d = _mde_raw
+                            if _d.dim() == 2:
+                                _d = _d.unsqueeze(0).unsqueeze(0)
+                            elif _d.dim() == 3:
+                                _d = _d.unsqueeze(1)
+                            cached_depth = disp_to_depth(_d.to(device).float())
+
+                    if ss_model is not None:
+                        # Reuse ss_pred_unatt when available
+                        _ss_logits = ss_pred_unatt if ss_pred_unatt is not None \
+                            else ss_model(unattacked_inputs_cache, return_logits=True)
+                        _road_pred = _ss_logits.argmax(dim=1)
+                        cached_road_mask = (_road_pred == 0).unsqueeze(1)
+                        cached_road_mask = keep_largest_component(cached_road_mask)
+
+                    if cached_depth is not None:
+                        cached_planes = fit_plane_from_depth(cached_depth, K, cached_road_mask)
+
+            H_flow, W_flow = pred_unattacked.shape[-2:]
+            B_flow = pred_unattacked.shape[0]
+
+            # Pre-compute SS softmax probabilities for outside-consistency
+            ss_prob_unatt = None
+            if ss_model is not None and args.attack_ss and ss_pred_unatt is not None:
+                with torch.no_grad():
+                    ss_prob_unatt = torch.softmax(ss_pred_unatt, dim=1)
+
+            # ----------------------------------------------------------
+            # Weight strategy: per-batch initialisation
+            # ----------------------------------------------------------
+            if weight_strategy == "normalized":
+                # Compute each task's clean-image loss and use 1/L_clean
+                # as a normaliser so that all tasks contribute equally at
+                # the start, then scaled by the user-provided ratios.
+                with torch.no_grad():
+                    _M_ones = torch.ones(
+                        (B_flow, 1, H_flow, W_flow), device=device)
+
+                    _flow_target = flow_target_fn(pred_unattacked) \
+                        if args.target != 'scene' \
+                        else flow_target_fn(pred_unattacked, 0, 0)
+                    _flow_target = _flow_target.to(device)
+                    L_flow_clean = flow_loss_fn(
+                        pred_unattacked, _flow_target, _M_ones
+                    ).clamp(min=1e-8)
+
+                    L_mde_clean = torch.tensor(1.0, device=device)
+                    if mde_model is not None and args.attack_mde and mde_pred_unatt is not None:
+                        _mde_target = mde_target_fn(mde_pred_unatt) \
+                            if args.mde_target != 'scene' \
+                            else mde_target_fn(mde_pred_unatt)
+                        _mde_target = _mde_target.to(device)
+                        _M_mde = torch.ones_like(mde_pred_unatt[:, :1, :, :])
+                        L_mde_clean = mde_loss_fn(
+                            mde_pred_unatt, _mde_target, _M_mde
+                        ).clamp(min=1e-8)
+
+                    L_ss_clean = torch.tensor(1.0, device=device)
+                    if ss_model is not None and args.attack_ss and ss_pred_unatt is not None:
+                        _ss_target = ss_target_fn(ss_pred_unatt).to(device)
+                        _M_ss = torch.ones(
+                            ss_pred_unatt.shape[0], 1,
+                            *ss_pred_unatt.shape[-2:], device=device)
+                        L_ss_clean = ss_loss_fn(
+                            ss_pred_unatt, _ss_target, _M_ss
+                        ).clamp(min=1e-8)
+
+                flow_w = flow_w_init / L_flow_clean.item()
+                mde_w = mde_w_init / L_mde_clean.item()
+                ss_w = ss_w_init / L_ss_clean.item()
+
+            elif weight_strategy == "minmax":
+                # Reset to uniform at the start of each batch
+                W = torch.ones(n_tasks, device=device) / n_tasks
+
             for inner_step in range(args.steps):
                 optimizer.zero_grad()
-
-                I1_batch = images[:, 0, :, :, :]  # [B,C,H_img,W_img]
-                I2_batch = images[:, 1, :, :, :]
 
                 # --- патч-проекция / текстурирование по плоскости дороги ---
                 if args.patch_projection:
@@ -342,10 +502,15 @@ def train_patch_ptlflow(
                         io_adapter=io_adapter,
                         device=device,
                         plane_aug=args.plane_aug,
+                        precomputed_depth=cached_depth,
+                        precomputed_road_mask=cached_road_mask,
+                        precomputed_planes=cached_planes,
+                        flow_shift=args.flow_shift,
                     )
                 else:
-                    I1_p_batch, I2_p_batch, M_batch, ys_batch, xs_batch, road_mask, planes = \
-                    A(I1_batch, I2_batch), None, None
+                    I1_p_batch, I2_p_batch, M_batch, ys_batch, xs_batch = A(
+                        I1_batch, I2_batch, flow_shift=args.flow_shift)
+                    road_mask, planes = None, None
 
                 # --- defense ---
                 if D is not None:
@@ -353,55 +518,36 @@ def train_patch_ptlflow(
                         I1_p_batch, I2_p_batch, M_batch)
                     I1_unatt_def_batch, I2_unatt_def_batch = D(
                         I1_batch, I2_batch, torch.zeros_like(M_batch))
+                    # When a defense is active the "unattacked" images are
+                    # defense-filtered, so re-compute inputs/predictions for
+                    # that branch (cannot reuse the clean-image cache).
+                    unattacked_images_tensor = torch.stack(
+                        [I1_unatt_def_batch, I2_unatt_def_batch], dim=1)
+                    unattacked_inputs = prepare_inputs_safe(
+                        unattacked_images_tensor, flows_tensor=flow_gt, valids_tensor=valid)
+                    with torch.no_grad():
+                        pred_unattacked = model(unattacked_inputs)['flows'].squeeze(0)
+                        if mde_model is not None and args.attack_mde:
+                            mde_pred_unatt = mde_model(unattacked_inputs)
+                        if ss_model is not None and args.attack_ss:
+                            ss_pred_unatt = ss_model(unattacked_inputs, return_logits=True)
+                            ss_prob_unatt = torch.softmax(ss_pred_unatt, dim=1)
                 else:
                     I1_att_def_batch, I2_att_def_batch = I1_p_batch, I2_p_batch
-                    I1_unatt_def_batch, I2_unatt_def_batch = I1_batch, I2_batch
+                    # Reuse the pre-computed cache (no defense applied)
+                    unattacked_inputs = unattacked_inputs_cache
 
                 attacked_images_tensor = torch.stack(
                     [I1_att_def_batch, I2_att_def_batch], dim=1)
-                unattacked_images_tensor = torch.stack(
-                    [I1_unatt_def_batch, I2_unatt_def_batch], dim=1)
 
                 attacked_inputs = prepare_inputs_safe(
                     attacked_images_tensor, flows_tensor=flow_gt, valids_tensor=valid)
-                unattacked_inputs = prepare_inputs_safe(
-                    unattacked_images_tensor, flows_tensor=flow_gt, valids_tensor=valid)
 
-                # --- forward through flow model ---
+                # --- forward through flow model (attacked only; unattacked is cached) ---
                 pred_attacked = model(attacked_inputs)['flows'].squeeze(0)
-                pred_unattacked = model(unattacked_inputs)['flows'].squeeze(0)
 
-                if TF_flow is not None:
-                    pred_attacked = TF_flow(pred_attacked, current_image=I1_att_def_batch)
-
-                H_flow, W_flow = pred_unattacked.shape[-2:]
-                B_flow = pred_attacked.shape[0]
-
-                # # --- построение маски "человека" в координатах flow ---
-                # if ys_batch is not None and xs_batch is not None:
-                #     # координаты центра патча в координатах исходного изображения
-                #     img_H, img_W = I1_batch.shape[-2:]
-                #     scale_x = W_flow / float(img_W)
-                #     scale_y = H_flow / float(img_H)
-
-                #     xs_scaled = xs_batch * scale_x
-                #     ys_scaled = ys_batch * scale_y
-
-                #     patch_size_flow = max(1, int(args.patch_size * scale_y))
-
-                #     ped_mask = build_pedestrian_like_mask(
-                #         xs_scaled,
-                #         ys_scaled,
-                #         patch_size=patch_size_flow,
-                #         pred_shape=pred_attacked.shape,
-                #         device=device,
-                #         width_factor=getattr(args, "ped_width_factor", 0.5),
-                #         height_factor=getattr(args, "ped_height_factor", 1.5),
-                #     )
-                # else:
-                #     ped_mask = torch.zeros(
-                #         (B_flow, 1, H_flow, W_flow), device=device, dtype=torch.float32
-                #     )
+                # if TF_flow is not None:
+                #     pred_attacked = TF_flow(pred_attacked, current_image=I1_att_def_batch)
 
                 if M_batch is not None and M_batch.dim() == 4 and M_batch.shape[1] == 1:
                     M_flow_patch = torch.nn.functional.interpolate(
@@ -412,7 +558,6 @@ def train_patch_ptlflow(
                         (B_flow, 1, H_flow, W_flow), device=device, dtype=torch.float32
                     )
 
-                # маска атаки: "человек над патчем"
                 M_attack_flow = M_flow_patch.float()
                 M_outside_flow = 1.0 - M_attack_flow
 
@@ -438,10 +583,7 @@ def train_patch_ptlflow(
                 # --- MDE branch ---
                 if mde_model is not None and args.attack_mde:
                     mde_pred_att = mde_model(attacked_inputs)
-                    mde_pred_unatt = mde_model(unattacked_inputs)
-
-                    if TF_mde is not None:
-                        mde_pred_att = TF_mde(mde_pred_att, current_image=I1_att_def_batch)
+                    # mde_pred_unatt is pre-computed above (cached or defense-adjusted)
 
                     if args.mde_target == 'scene':
                         mde_target_batch = mde_target_fn(
@@ -454,7 +596,7 @@ def train_patch_ptlflow(
 
                     # маски в разрешении depth
                     M_attack_mde = torch.nn.functional.interpolate(
-                        M_attack_flow, size=mde_pred_att.shape[-    2:], mode='nearest'
+                        M_attack_flow, size=mde_pred_att.shape[-2:], mode='nearest'
                     )
                     M_outside_mde = 1.0 - M_attack_mde
 
@@ -472,12 +614,11 @@ def train_patch_ptlflow(
                 # --- semantic segmentation branch ---
                 if ss_model is not None and args.attack_ss:
                     ss_pred_att = ss_model(attacked_inputs, return_logits=True)
-                    ss_pred_unatt = ss_model(
-                        unattacked_inputs, return_logits=True)
-                    
-                    if TF_ss is not None:
-                        ss_pred_att = TF_ss(ss_pred_att, current_image=I1_att_def_batch)
-                    
+                    # ss_pred_unatt and ss_prob_unatt are pre-computed above
+
+                    # if TF_ss is not None:
+                        # ss_pred_att = TF_ss(ss_pred_att, current_image=I1_att_def_batch)
+
                     ss_target_batch = ss_target_fn(ss_pred_unatt).to(device)
 
                     M_attack_ss = torch.nn.functional.interpolate(
@@ -491,10 +632,7 @@ def train_patch_ptlflow(
                     )
 
                     # outside-consistency по вероятностям
-                    with torch.no_grad():
-                        ss_prob_unatt = torch.softmax(ss_pred_unatt, dim=1)
                     ss_prob_att = torch.softmax(ss_pred_att, dim=1)
-
                     ss_cons_loss = masked_mse_consistency(
                         ss_prob_att, ss_prob_unatt, M_outside_ss
                     )
@@ -502,14 +640,23 @@ def train_patch_ptlflow(
                     ss_adv_loss = torch.tensor(0.0, device=device)
                     ss_cons_loss = torch.tensor(0.0, device=device)
 
-                # --- TV loss ---
-                tv_w = getattr(args, "tv_weight", 0.0)
-                tv_loss = total_variation_loss(A.P, tv_w)
+                # --- TV loss (skip when weight is 0) ---
+                tv_loss = total_variation_loss(A.P, tv_w) if tv_w > 0.0 \
+                    else torch.tensor(0.0, device=device)
 
-                # --- Printability (NPS) loss ---
-                nps_w = getattr(args, "nps_weight", 0.0)
-                nps_loss = printability_loss(A.P, nps_w)
+                # --- Printability (NPS) loss (skip when weight is 0) ---
+                nps_loss = printability_loss(A.P, nps_w) if nps_w > 0.0 \
+                    else torch.tensor(0.0, device=device)
 
+                # --- Resolve per-task weights for this step ------
+                if weight_strategy == "minmax":
+                    # Map simplex vector W back to per-task scalars.
+                    # W is ordered according to active_tasks.
+                    _wi = {t: W[i] for i, t in enumerate(active_tasks)}
+                    flow_w = _wi.get("flow", torch.tensor(0.0, device=device))
+                    mde_w = _wi.get("mde", torch.tensor(0.0, device=device))
+                    ss_w = _wi.get("ss", torch.tensor(0.0, device=device))
+                # (for 'fixed' and 'normalized', flow_w/mde_w/ss_w are already set)
 
                 # --- TOTAL LOSS ---
                 total_loss = (
@@ -523,14 +670,56 @@ def train_patch_ptlflow(
                     nps_loss
                 )
 
-
                 total_loss.backward()
                 optimizer.step()
 
-                step = epoch * len(data_loader) * args.steps + \
-                    batch_idx * args.steps + inner_step
+                # --- Inner minimisation: update w  (Alg.1 step 4, Eq.4) ---
+                # Guo et al. ICASSP 2025, Eq.2:
+                #   max_δ  min_{w∈P}  Σ w_i L_i(x+δ) + γ/2 ||w − 1/k||²
+                #
+                # In the paper L_i is *maximised* (PGD ascent), so the inner
+                # min over w uses gradient descent:
+                #   ∇_w f = L_vec + γ(w − 1/k)
+                #   w_new = proj_P(w − α₂ · ∇_w f)            ... Eq.4
+                #
+                # In our patch attack we *minimise* L_i (lower = better attack),
+                # so the task with the HIGHEST loss is the hardest to attack.
+                # The equivalent formulation is:
+                #   min_patch  max_{w∈P}  Σ w_i L_i − γ/2 ||w − 1/k||²
+                # which gives gradient ASCENT on w:
+                #   ∇_w g = L_vec − γ(w − 1/k)
+                #   w_new = proj_P(w + α₂ · ∇_w g)
+                if weight_strategy == "minmax":
+                    with torch.no_grad():
+                        task_losses = []
+                        for t in active_tasks:
+                            if t == "flow":
+                                task_losses.append(flow_adv_loss.detach())
+                            elif t == "mde":
+                                task_losses.append(mde_adv_loss.detach())
+                            elif t == "ss":
+                                task_losses.append(ss_adv_loss.detach())
+                        L_vec = torch.stack(task_losses)
+                        grad_w = L_vec - gamma_w * (W - 1.0 / n_tasks)
+                        W = project_simplex(W + alpha_w * grad_w)
 
-                if metrics_tracker is not None:
+                step = epoch * len(data_loader) + batch_idx
+
+                is_last_inner = (inner_step == args.steps - 1)
+
+                if is_last_inner:
+                    epoch_accum["loss"] += total_loss.detach()
+                    epoch_accum["flow_adv"] += flow_adv_loss.detach()
+                    epoch_accum["mde_adv"] += mde_adv_loss.detach()
+                    epoch_accum["ss_adv"] += ss_adv_loss.detach()
+                    epoch_accum["flow_cons"] += flow_cons_loss.detach()
+                    epoch_accum["mde_cons"] += mde_cons_loss.detach()
+                    epoch_accum["ss_cons"] += ss_cons_loss.detach()
+                    epoch_accum["tv"] += tv_loss.detach()
+                    epoch_accum["nps"] += nps_loss.detach()
+                    n_batches += 1
+
+                if metrics_tracker is not None and is_last_inner:
                     metrics_tracker.log_metric(
                         "epoch_batch_loss", float(total_loss.item()), step=step)
                     metrics_tracker.log_metric(
@@ -547,6 +736,10 @@ def train_patch_ptlflow(
                         "epoch_batch_ss_cons_loss", float(ss_cons_loss.item()), step=step)
                     metrics_tracker.log_metric("epoch_batch_tv_loss", float(tv_loss.item()), step=step)
                     metrics_tracker.log_metric("epoch_batch_nps_loss", float(nps_loss.item()), step=step)
+                    if weight_strategy in ("normalized", "minmax"):
+                        metrics_tracker.log_metric("w_flow", float(flow_w) if isinstance(flow_w, float) else float(flow_w.item()), step=step)
+                        metrics_tracker.log_metric("w_mde", float(mde_w) if isinstance(mde_w, float) else float(mde_w.item()), step=step)
+                        metrics_tracker.log_metric("w_ss", float(ss_w) if isinstance(ss_w, float) else float(ss_w.item()), step=step)
                 # clamp patch values
                 if (not args.change_of_variables) and args.optimizer not in ["ifgsm", "pgd"]:
                     with torch.no_grad():
@@ -585,6 +778,12 @@ def train_patch_ptlflow(
                         ss_pred_unatt_vis, f"batch_{batch_idx:04d}_unattacked_ss", artifact_type="ss")
                     metrics_tracker.save_artifact(
                         ss_target_batch, f"batch_{batch_idx:04d}_target_ss", artifact_type="ss")
+
+        # Log epoch-level averages (one value per epoch for clear trend)
+        if metrics_tracker is not None and n_batches > 0:
+            for key, val in epoch_accum.items():
+                avg = float(val) / n_batches
+                metrics_tracker.log_metric(f"epoch_avg_{key}", avg, step=epoch)
 
         # save patch
         A.save_png(op.join(

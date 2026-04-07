@@ -215,16 +215,6 @@ class PatchAdversary(torch.nn.Module):
         p0 = t * ray_dir  # [3] — центр патча в 3D
         Zc = p0[2].abs()  # глубина центра
 
-        if True:   # можно ограничить batch_idx/inner_step
-            debug_plane_ellipse(
-                rgb_tensor=image,      # [3,H,W]
-                K=K_mat,
-                p0=p0,
-                t1=t1,
-                t2=t2,
-                R=1,   # радиус окружности на плоскости в метрах
-                out_path="debug_plane/ellipse.png"
-            )
         # размер патча в пикселях
         Hp, Wp = patch.shape[-2:]
         # физический размер патча в метрах
@@ -303,7 +293,7 @@ class PatchAdversary(torch.nn.Module):
         return I_out, M
 
     def forward(self, I1, I2, y=None, x=None,
-                K=None, planes=None, road_masks=None):
+                K=None, planes=None, road_masks=None, flow_shift=0.0):
         if (K is not None) and (planes is not None):
             B, C, H, W = I1.shape
             device = I1.device
@@ -388,7 +378,6 @@ class PatchAdversary(torch.nn.Module):
 
                     uv_center = (x_c, y_c)
 
-                    # проецируем патч в I1[b] и I2[b] при данном центре
                     I1_p_b, M_b = self._project_single_on_plane(
                         image=I1[b],
                         patch=P_tex,
@@ -399,13 +388,15 @@ class PatchAdversary(torch.nn.Module):
                         road_mask=road_mask_b
                     )
 
+                    uv_center_f2 = (uv_center[0], uv_center[1] + flow_shift) \
+                        if flow_shift != 0 else uv_center
                     I2_p_b, _ = self._project_single_on_plane(
                         image=I2[b],
                         patch=P_tex,
                         K_mat=K_mat_b,
                         normal=normal_b,
                         d_plane=d_b,
-                        uv_center=uv_center,
+                        uv_center=uv_center_f2,
                         road_mask=road_mask_b
                     )
 
@@ -525,11 +516,26 @@ class PatchAdversary(torch.nn.Module):
 
         # Construct result (replace image where patch is not transparent)
         R1 = (1 - M_glob) * I1 + P_glob_cov * M_glob
-        R2 = (1 - M_glob) * I2 + P_glob_cov * M_glob
 
-        M = torch.where(M_glob > 0, 1, 0).to(I1.device)
+        if flow_shift != 0:
+            y2 = y + int(round(flow_shift))
+            y2 = max(h // 2, min(H - h // 2 - 1, y2))
+            P_glob2 = pad(P_res, ((x - w // 2), W - w - (x - w // 2),
+                         (y2 - h // 2), H - h - (y2 - h // 2)))
+            M_glob2 = pad(M, ((x - w // 2), W - w - (x - w // 2),
+                         (y2 - h // 2), H - h - (y2 - h // 2)))
+            if self.cov:
+                P_glob_cov2 = .5 * (torch.tanh(P_glob2) + 1)
+            else:
+                P_glob_cov2 = torch.clamp(P_glob2, 0.0, 1.0)
+            M_glob2 = torch.ceil(M_glob2)
+            R2 = (1 - M_glob2) * I2 + P_glob_cov2 * M_glob2
+        else:
+            R2 = (1 - M_glob) * I2 + P_glob_cov * M_glob
 
-        return R1, R2, M, y, x
+        M_out = torch.where(M_glob > 0, 1, 0).to(I1.device)
+
+        return R1, R2, M_out, y, x
 
 
     def save_png(self, name):

@@ -121,7 +121,7 @@ def load_dataset_args(dataset_name):
 
 
 def prepare_dataloader(mode='training', dataset_name='Sintel', shuffle=False, batch_size=1,
-                       small_run=False, image_size=2, demo_path=None, n_images=-1, has_depth=True):
+                       small_run=False, subset_size=0, image_size=2, demo_path=None, n_images=-1, has_depth=True):
     """
     Get a PyTorch dataloader for the specified dataset using arguments from a configuration file.
 
@@ -170,21 +170,23 @@ def prepare_dataloader(mode='training', dataset_name='Sintel', shuffle=False, ba
 
     ds_has_gt = dataset.has_groundtruth()
 
-    # Optionally limit dataset size for debugging
+    # Optionally limit dataset size
+    n_subset = 0
     if small_run:
-        indices = np.random.choice(
-            len(dataset), min(32, len(dataset)), replace=False)
+        n_subset = 32
+    if subset_size > 0:
+        n_subset = subset_size
+
+    if n_subset > 0 and n_subset < len(dataset):
+        indices = np.random.choice(len(dataset), n_subset, replace=False)
         dataset = Subset(dataset, indices)
 
     # Create DataLoader
     dataloader = DataLoader(
         dataset, batch_size=batch_size, shuffle=shuffle)
-    
-    if small_run:
-        # If using Subset, we need to access the original dataset via .dataset
-        base_ds = dataset.dataset
-    else:
-        base_ds = dataset
+
+    is_subset = isinstance(dataset, Subset)
+    base_ds = dataset.dataset if is_subset else dataset
 
     dataloader.image_size = (base_ds.image_x_dim, base_ds.image_y_dim)
 

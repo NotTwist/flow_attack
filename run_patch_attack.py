@@ -19,8 +19,13 @@ import ptlflow
 import cv2 as cv2
 from utils.targets import get_target, get_mde_target, get_ss_target
 from attacks.DetectionDefenses.helper_functions.patch_adversary import PatchAdversary
-from attacks.patch_projection import  project_patch_on_scene
-
+from attacks.patch_projection import (
+    project_patch_on_scene,
+    fit_plane_from_depth,
+    keep_largest_component,
+)
+from attacks.adversarial_manhole.adv_manhole.texture_mapping.depth_utils import disp_to_depth
+from defenses.temporal_filter import init_temporal_filters, reset_temporal_filters, apply_temporal_filters
 
 def load_model(model_name, dataset):
     model_ref = ptlflow.get_model_reference(model_name)
@@ -50,11 +55,13 @@ def main():
 
     # Prepare dataloader
     data_loader, has_gt = prepare_dataloader(mode='training',
-                                             dataset_name=args.dataset, small_run=args.small_run, n_images=1)
+                                             dataset_name=args.dataset, small_run=args.small_run,
+                                             subset_size=getattr(args, 'subset_size', 0), n_images=1)
     image_size = data_loader.image_size
     # Отдельный loader только для оценки перцентиля глубины (если хотим взять цель атаки, которая зависит от датасета)
     depth_loader, _ = prepare_dataloader(
-        dataset_name=args.dataset, small_run=args.small_run)
+        dataset_name=args.dataset, small_run=args.small_run,
+        subset_size=getattr(args, 'subset_size', 0))
     
     # Load optical flow model
     model = load_model(args.model_name, args.dataset.lower()).to(device)
@@ -62,25 +69,22 @@ def main():
     for param in model.parameters():
         param.requires_grad = False
 
-    # Load MDE model
+    # Load MDE model (only when it will be attacked)
     mde_model = None
-    depth_pred = None
-    original_depth = None
-    mde_target = None
-    of_target_fn = get_target(args.target)
+    of_target_fn = get_target(args.target, magnitude=args.flow_target_magnitude)
 
     if args.attack_mde:
         mde_model = load_mde_model(model_name=args.mde_model, device=device)
         mde_target_fn = get_mde_target(
             target_name=args.mde_target,
-            data_loader=depth_loader,   # отдельный loader!
+            data_loader=depth_loader,
             flow_model=model,
             mde_model=mde_model,
             device=device,
-            q=0.9 # квантиль
+            q=0.9
         )
 
-    # Load semantic segmentation model
+    # Load semantic segmentation model (only when it will be attacked)
     ss_model = None
     if args.attack_ss:
         ss_model = load_seg_model(model_name=args.ss_model, device=device)
@@ -91,11 +95,20 @@ def main():
     io_adapter = ptlflow.utils.io_adapter.IOAdapter(
         model, input_size=data_loader, cuda=torch.cuda.is_available())
     
+
+    # defences
+    temporal_filters = init_temporal_filters(args, device=device)
+    reset_temporal_filters(temporal_filters)
+
     # Train new patch or use patch from args.trained_patch
     if args.trained_patch == '':
         print("Starting patch training...")
         train_tracker = AttackMetricsTracker(
-            output_dir=args.output_dir, args=args, train=True)
+            output_dir=args.output_dir,
+            experiment_name=args.experiment_name,
+            args=args,
+            train=True,
+        )
         # train patch on train dataloader
         trained_patch = train_patch_ptlflow(
             args, model, data_loader, device, io_adapter, train_tracker, mde_model, ss_model)
@@ -114,23 +127,68 @@ def main():
     eval_loader, has_gt = prepare_dataloader(mode='testing',
                                              dataset_name=args.dataset, small_run=args.small_run, n_images=1, has_depth=False)
     eval_tracker = AttackMetricsTracker(
-        output_dir=args.output_dir, args=args)
+        output_dir=args.output_dir,
+        experiment_name=args.experiment_name,
+        args=args,
+    )
     
     # Evaluate path on eval dataset
     for batch, (images, flow, valid, meta, K) in enumerate(tqdm(eval_loader)):
         io_adapter = ptlflow.utils.io_adapter.IOAdapter(
-            model, input_size=images.shape[-2:], cuda=torch.cuda.is_available(
-            )
+            model, input_size=images.shape[-2:], cuda=torch.cuda.is_available()
         )
-        wrapped_inputs = {'images': images,
-                          'flows': flow, 'valids': valid}
+        wrapped_inputs = {'images': images, 'flows': flow, 'valids': valid}
         inputs = io_adapter.prepare_inputs(inputs=wrapped_inputs)
         images = images.to(device)
-        
-        I1_batch = images[:, 0, :, :, :] 
+
+        I1_batch = images[:, 0, :, :, :]
         I2_batch = images[:, 1, :, :, :]
 
-        # project patch onto the plane
+        # ---------------------------------------------------------------
+        # Pre-compute clean-image predictions for ALL models in one pass.
+        # These are used both for metrics (original_*) and for patch
+        # projection (precomputed_depth / road_mask / planes), so we only
+        # need to run each model once on the clean input.
+        # ---------------------------------------------------------------
+        original_depth = None
+        mde_target     = None
+        original_ss    = None
+        ss_target      = None
+
+        proj_depth     = None   # metric depth [B,1,H,W] for plane fitting
+        proj_road_mask = None   # binary road mask [B,1,H,W]
+        proj_planes    = None   # list of (normal, d) per batch element
+
+        with torch.no_grad():
+            original_flow = model(inputs)['flows'].squeeze(0)
+            of_target = of_target_fn(original_flow)
+
+            if args.attack_mde:
+                original_depth = mde_model(inputs)
+                mde_target = mde_target_fn(original_depth)
+                # Convert raw model output → metric depth for plane fitting
+                _d = original_depth
+                if _d.dim() == 2:
+                    _d = _d.unsqueeze(0).unsqueeze(0)
+                elif _d.dim() == 3:
+                    _d = _d.unsqueeze(1)
+                proj_depth = disp_to_depth(_d.to(device).float())
+
+            if args.attack_ss:
+                # Single forward pass: logits used for road mask + argmax for metrics
+                _ss_logits = ss_model(inputs, return_logits=True)
+                original_ss = _ss_logits.argmax(dim=1)   # [B,H,W] class map
+                ss_target = ss_target_fn(_ss_logits)
+                # Road mask for patch projection
+                proj_road_mask = (_ss_logits.argmax(dim=1) == 0).unsqueeze(1)
+                proj_road_mask = keep_largest_component(proj_road_mask)
+
+            if proj_depth is not None:
+                proj_planes = fit_plane_from_depth(proj_depth, K, proj_road_mask)
+
+        # Project patch onto the road plane; all expensive per-clean-image
+        # work is already done above — project_patch_on_scene only needs to
+        # apply the PatchAdversary with the pre-fitted geometry.
         if args.patch_projection:
             attacked_image1, attacked_image2, mask, y, x, road_mask, planes = project_patch_on_scene(
                 I1_batch,
@@ -141,45 +199,41 @@ def main():
                 ss_model=ss_model,
                 io_adapter=io_adapter,
                 device=device,
-                plane_aug=False    # disable randomness in evaluation
+                plane_aug=False,    # disable randomness in evaluation
+                precomputed_depth=proj_depth,
+                precomputed_road_mask=proj_road_mask,
+                precomputed_planes=proj_planes,
+                flow_shift=args.flow_shift,
             )
         else:
             attacked_image1, attacked_image2, mask, y, x = trained_patch(
-                images[:, 0, :, :, :], images[:, 1, :, :, :])
+                images[:, 0, :, :, :], images[:, 1, :, :, :],
+                flow_shift=args.flow_shift)
         attacked_images = torch.stack(
             [attacked_image1, attacked_image2], dim=1).squeeze(0)
-        
-        # get original predictions for models
-        with torch.no_grad():
-            original_flow = model(inputs)['flows'].squeeze(0)
-            of_target = of_target_fn(original_flow)
-            if args.attack_mde:
-                original_depth = mde_model(inputs)
-                mde_target = mde_target_fn(
-                    original_depth)
-            if args.attack_ss:
-                original_ss = ss_model(inputs)
-                ss_target = ss_target_fn(original_ss)
+
         inputs = replace_images_dic(inputs, attacked_images)
 
-        # deltas = torch.clamp(get_image_tensors(
-        #     attacked_images).detach().cpu(), 0, 1) - images.squeeze(0)
-
-        # get attacked predictions for models
+        # Get attacked predictions for models
         with torch.no_grad():
-            flow_pred = model(inputs)[
-                'flows'].squeeze(0)
+            flow_pred = model(inputs)['flows'].squeeze(0)
+            flow_pred = apply_temporal_filters(temporal_filters, flow_pred, attacked_image1, 'flow')
             depth_pred = None
+            ss_pred = None
             if args.attack_mde:
                 depth_pred = mde_model(inputs)
+                depth_pred = apply_temporal_filters(temporal_filters, depth_pred, attacked_image1, 'mde')
+
             if args.attack_ss:
                 ss_pred = ss_model(inputs)
+                ss_pred = apply_temporal_filters(temporal_filters, ss_pred, attacked_image1, 'ss')
 
-        # update metrics
+
+        # update metrics (чистый выход модели — для AEE/multitask; GT только если есть)
         eval_tracker.update(
-            flow,
+            original_flow,
             flow_pred,
-            gt_flow=flow,
+            gt_flow=flow if has_gt else None,
             target_flow=of_target,
             inverse_flow=None,
             valid=valid,
@@ -192,27 +246,35 @@ def main():
             original_seg=original_ss, attacked_seg=ss_pred, target_seg=ss_target
         )
 
-        # Save artifacts
-        if args.save_artifacts:
+        # Always save eval artifacts for visualization
+        eval_tracker.save_artifact(
+            I1_batch, f"eval_{batch:04d}_clean_image", artifact_type="image")
+        eval_tracker.save_artifact(
+            attacked_image1, f"eval_{batch:04d}_attacked_image", artifact_type="image")
+        eval_tracker.save_artifact(
+            original_flow, f"eval_{batch:04d}_clean_flow", artifact_type="flow")
+        eval_tracker.save_artifact(
+            flow_pred, f"eval_{batch:04d}_attacked_flow", artifact_type="flow")
+        eval_tracker.save_artifact(
+            of_target, f"eval_{batch:04d}_target_flow", artifact_type="flow")
+        if mask is not None:
             eval_tracker.save_artifact(
-                get_image_tensors(inputs)[0], f"batch_{batch:04d}_attacked_image", artifact_type="image"
-            )
+                mask, f"eval_{batch:04d}_patch_mask", artifact_type="image")
+        if depth_pred is not None:
             eval_tracker.save_artifact(
-                flow_pred, f"batch_{batch:04d}_attacked_flow", artifact_type="flow"
-            )
+                original_depth, f"eval_{batch:04d}_clean_depth", artifact_type="depth")
             eval_tracker.save_artifact(
-                original_flow, f"batch_{batch:04d}_init_flow", artifact_type="flow")
-            if depth_pred is not None:
-                eval_tracker.save_artifact(
-                    original_depth, f"batch_{batch:04d}_init_depth", artifact_type="depth")
-                eval_tracker.save_artifact(
-                    depth_pred, f"batch_{batch:04d}_attacked_depth", artifact_type="depth"
-                )
-            if args.attack_ss:
-                eval_tracker.save_artifact(
-                    original_ss, f"batch_{batch:04d}_init_ss", artifact_type="ss")
-                eval_tracker.save_artifact(
-                    ss_pred, f"batch_{batch:04d}_attacked_ss", artifact_type="ss")
+                depth_pred, f"eval_{batch:04d}_attacked_depth", artifact_type="depth")
+            eval_tracker.save_artifact(
+                torch.abs(original_depth - depth_pred),
+                f"eval_{batch:04d}_depth_diff", artifact_type="depth")
+        if args.attack_ss and ss_pred is not None:
+            eval_tracker.save_artifact(
+                original_ss, f"eval_{batch:04d}_clean_ss", artifact_type="ss")
+            eval_tracker.save_artifact(
+                ss_pred, f"eval_{batch:04d}_attacked_ss", artifact_type="ss")
+            eval_tracker.save_artifact(
+                ss_target, f"eval_{batch:04d}_target_ss", artifact_type="ss")
                 
     eval_tracker.finalize()
 

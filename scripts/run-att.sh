@@ -1,4 +1,5 @@
 #!/bin/bash
+cd "$(dirname "$0")/.."
 
 # --------------------------------------------
 #  Настройки эксперимента
@@ -62,7 +63,7 @@ for epsilon in "${epsilons[@]}"; do
       outdir="/mnt/ssd1/28s_mur/results/${model}/${attack}/eps_${epsilon//\//_}"
       mkdir -p "$outdir"
 
-      python run_attack_ptlflow.py \
+      python3 run_attack_ptlflow.py \
         --model_name "$model" \
         --attack_type "$attack" \
         --epsilon "$eps_val" \

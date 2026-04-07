@@ -10,6 +10,7 @@ env/
 *.png
 *.mp4
 *.pth
+*.pdf
 
 datasets/
 models/_pretrained_weights/
