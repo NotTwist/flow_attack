@@ -4,6 +4,21 @@
 с реальными прогонами run_patch_attack.py. Результаты пишутся в CSV; рейтинг
 строится по числам из блока «Final AEE Metrics» (без чтения MLflow).
 
+Какие три (или K) моделей «самые уязвимые» **в терминах этого скрипта**
+-----------------------------------------------------------------------
+Скрипт **не угадывает** архитектуры: ты задаёшь кандидатов в ``--flow-models``, один
+и тот же патч и одну и ту же базовую команду после ``--``. После всех прогонов
+уязвимость = **наименьшая** итоговая метрика среди успешных run:
+
+  1) сначала по ``multitask_target_ratio`` (строка «Multi-task target ratio …»),
+     если она попала в вывод;
+  2) иначе по ``AEE (attacked vs target)``;
+  3) при равенстве по (1) сравнивается второе число (aee_target).
+
+**Топ-K самых уязвимых** — это первые K строк итоговой таблицы (см. ``--top-k``).
+Чтобы получить именно «три модели», передай хотя бы трёх кандидатов в ``--flow-models``
+и смотри первые 3 строки (или ``--top-k 3``).
+
 Критерии (меньше = сильнее атака к цели):
   - multitask_ratio — строка «Multi-task target ratio ...»
   - aee_target — «AEE (attacked vs target)»
@@ -214,6 +229,12 @@ def main() -> None:
         help="Предохранитель: не стартовать, если комбинаций больше этого числа",
     )
     p.add_argument(
+        "--top-k",
+        type=int,
+        default=3,
+        help="Сколько первых строк рейтинга печатать как «самые уязвимые» (остальные до 20 — кратко)",
+    )
+    p.add_argument(
         "remainder",
         nargs=argparse.REMAINDER,
         help="После -- : команда, обычно: python run_patch_attack.py ...",
@@ -327,14 +348,23 @@ def main() -> None:
         return
 
     ranked = rank_rows(rows_accum)
-    print("\n--- Успешные прогоны: сильнее атака выше в списке (меньше метрика) ---\n")
-    for j, r in enumerate(ranked[:20], 1):
+    top_k = max(1, args.top_k)
+    print("\n--- Топ уязвимых (меньше multitask / aee_target ⇒ сильнее атака к цели) ---\n")
+    for j, r in enumerate(ranked[:top_k], 1):
         print(
             f"{j:2}. flow={r['flow_model']!r} mde={r['mde_model']!r} ss={r['ss_model']!r} | "
             f"mts={r['multitask_target_ratio']!s} aee_tgt={r['aee_target_attack']!s}"
         )
-    if len(ranked) > 20:
-        print(f"... и ещё {len(ranked) - 20} строк (полный лог в {args.results_csv})")
+    rest = 20
+    if len(ranked) > top_k:
+        print(f"\n--- До {rest} места (продолжение) ---\n")
+        for j, r in enumerate(ranked[top_k:rest], top_k + 1):
+            print(
+                f"{j:2}. flow={r['flow_model']!r} mde={r['mde_model']!r} ss={r['ss_model']!r} | "
+                f"mts={r['multitask_target_ratio']!s} aee_tgt={r['aee_target_attack']!s}"
+            )
+    if len(ranked) > rest:
+        print(f"... и ещё {len(ranked) - rest} строк (полный лог в {args.results_csv})")
     elif ranked:
         print(f"\nПолные строки: {args.results_csv}")
     else:
