@@ -144,6 +144,14 @@ def parse_args():
     parser.add_argument('--patch_size', type=int, default=100,
                         help="Size of the adversarial patch")
 
+    parser.add_argument(
+        '--patch_parametrization',
+        type=str,
+        default='pixel',
+        choices=['pixel', 'diffusion'],
+        help="Patch parametrization: legacy pixel patch or diffusion latent patch"
+    )
+
     parser.add_argument('--change_of_variables', action='store_true',
                         help="Use change-of-variable trick in patch optimization")
     parser.add_argument('--random_loc', action='store_false',
@@ -222,6 +230,95 @@ def parse_args():
         type=float,
         default=0,
         help="Weight for non-printability score regularization"
+    )
+
+    parser.add_argument(
+        "--diffusion_model",
+        type=str,
+        default="sdxl",
+        choices=["sd14", "sd15", "sd21", "sdxl"],
+        help="Stable Diffusion backbone used for latent patch optimization"
+    )
+    parser.add_argument(
+        "--diffusion_model_path",
+        type=str,
+        default="",
+        help="Optional local path or HF model id overriding --diffusion_model"
+    )
+    parser.add_argument(
+        "--diffusion_prompt",
+        type=str,
+        default="",
+        help="Prompt used to denoise latent patches; required for image+nulltext mode"
+    )
+    parser.add_argument(
+        "--diffusion_init_mode",
+        type=str,
+        default="random",
+        choices=["random", "image"],
+        help="Initialize the latent patch from random noise or from a base image with null-text optimization"
+    )
+    parser.add_argument(
+        "--diffusion_base_image",
+        type=str,
+        default="",
+        help="Base image path used for DDIM inversion and null-text optimization"
+    )
+    parser.add_argument(
+        "--diffusion_dtype",
+        type=str,
+        default="auto",
+        choices=["auto", "fp16", "fp32"],
+        help="Precision for Stable Diffusion inference"
+    )
+    parser.add_argument(
+        "--diffusion_source_steps",
+        type=int,
+        default=50,
+        help="Total DDIM steps used by the diffusion patch generator"
+    )
+    parser.add_argument(
+        "--diffusion_reverse_steps",
+        type=int,
+        default=25,
+        help="How many DDIM denoising steps are used to render the patch"
+    )
+    parser.add_argument(
+        "--diffusion_guidance_scale",
+        type=float,
+        default=7.5,
+        help="Classifier-free guidance scale for the diffusion patch generator"
+    )
+    parser.add_argument(
+        "--diffusion_latent_eps",
+        type=float,
+        default=0.5,
+        help="L-infinity budget for the optimized latent delta"
+    )
+    parser.add_argument(
+        "--diffusion_null_inner_steps",
+        type=int,
+        default=15,
+        help="Inner optimization steps for null-text inversion"
+    )
+    parser.add_argument(
+        "--diffusion_null_epsilon",
+        type=float,
+        default=1e-5,
+        help="Early-stop threshold for null-text inversion"
+    )
+    parser.add_argument(
+        "--diffusion_optimizer",
+        type=str,
+        default="adam",
+        choices=["adam", "sgd", "ifgsm", "clipped-pgd"],
+        help="Optimizer used for latent-space updates when diffusion parametrization is enabled"
+    )
+    parser.add_argument(
+        "--diffusion_seed",
+        type=int,
+        default=42,
+        help="Seed used for random latent initialization"
     )
     
     parser.add_argument("--plane_aug", action='store_true',

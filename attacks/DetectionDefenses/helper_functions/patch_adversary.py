@@ -34,7 +34,7 @@ def circ_mask(X, /, k=0):
 
 
 class PatchAdversary(torch.nn.Module):
-    def __init__(self, P, *, angle=[-10, 10], scale=[0.95, 1.05], size=None, change_of_variable=False, random_location=True, image_size=(256, 256),  ellipse_scale_x=1.0, ellipse_scale_y=3):
+    def __init__(self, P, *, angle=[-10, 10], scale=[0.95, 1.05], size=None, change_of_variable=False, random_location=True, image_size=(256, 256),  ellipse_scale_x=1.0, ellipse_scale_y=3, patch_generator=None):
         """
         Adversarial patch that applies the patch to the image. This class is used for the patch attack with defense.
 
@@ -49,8 +49,16 @@ class PatchAdversary(torch.nn.Module):
         """
         super(PatchAdversary, self).__init__()
 
-        # Initialize Patch from random, filepath, or tensor
-        if P is None:
+        self.patch_generator = patch_generator
+        self._runtime_patch = None
+        self._runtime_final_latent = None
+
+        # Initialize Patch from random, filepath, tensor, or diffusion generator.
+        if self.patch_generator is not None:
+            assert size is not None, "A diffusion patch still requires an explicit patch size"
+            self.P = None
+            self.M = circ_mask(torch.zeros((1, 3, size, size)))
+        elif P is None:
             assert size is not None, "If no patch is given, a size must be specified"
             self.P = torch.zeros((1, 3, size, size))
             self.M = circ_mask(self.P)
@@ -74,24 +82,33 @@ class PatchAdversary(torch.nn.Module):
                 raise ValueError("Patch must have 4 channels (RGB and alpha)")
     
         if size is not None:
-            current_h, current_w = self.P.shape[-2], self.P.shape[-1]
-            if current_h != size or current_w != size:
-                self.P = F.interpolate(
-                    self.P, 
-                    size=(size, size), 
-                    mode='bilinear', 
-                    align_corners=False
-                )
+            current_h, current_w = self.M.shape[-2], self.M.shape[-1]
+            if self.patch_generator is None and self.P is not None:
+                current_h, current_w = self.P.shape[-2], self.P.shape[-1]
+                if current_h != size or current_w != size:
+                    self.P = F.interpolate(
+                        self.P,
+                        size=(size, size),
+                        mode='bilinear',
+                        align_corners=False
+                    )
+                    self.M = F.interpolate(
+                        self.M,
+                        size=(size, size),
+                        mode='bilinear',
+                        align_corners=False
+                    )
+            elif current_h != size or current_w != size:
                 self.M = F.interpolate(
-                    self.M, 
-                    size=(size, size), 
-                    mode='bilinear', 
+                    self.M,
+                    size=(size, size),
+                    mode='bilinear',
                     align_corners=False
                 )
-                self.M = torch.clamp(self.M, 0.0, 1.0)
+            self.M = torch.clamp(self.M, 0.0, 1.0)
 
-
-        self.P = torch.nn.Parameter(self.P, requires_grad=True)
+        if self.patch_generator is None:
+            self.P = torch.nn.Parameter(self.P, requires_grad=True)
         self.M = torch.nn.Parameter(self.M, requires_grad=False)
         self.angle = angle
         self.scale = scale
@@ -99,7 +116,12 @@ class PatchAdversary(torch.nn.Module):
         self.random_location = random_location
         # Image dimensions and patch size
         self.image_size = image_size
-        self.patch_size = size if size is not None else P.shape[-1]
+        if size is not None:
+            self.patch_size = size
+        elif self.patch_generator is not None:
+            self.patch_size = self.patch_generator.patch_size
+        else:
+            self.patch_size = P.shape[-1]
 
         # Randomly initialize the patch position during object creation
         H, W = self.image_size
@@ -110,7 +132,11 @@ class PatchAdversary(torch.nn.Module):
         self.ellipse_scale_y = ellipse_scale_y
 
     def get_P(self, Mask=False):
-        if self.cov:
+        if self._runtime_patch is not None:
+            P = self._runtime_patch
+        elif self.patch_generator is not None:
+            P = self.patch_generator.render_patch()
+        elif self.cov:
             P = .5 * (torch.tanh(self.P) + 1)
         else:
             P = self.P
@@ -118,6 +144,38 @@ class PatchAdversary(torch.nn.Module):
             return torch.concat([P, self.M], dim=1)
         else:
             return P
+
+    def uses_diffusion_patch(self):
+        return self.patch_generator is not None
+
+    def prepare_runtime_patch(self):
+        if self.patch_generator is None:
+            return None
+        self._runtime_patch, self._runtime_final_latent = (
+            self.patch_generator.render_patch_for_optimization()
+        )
+        return self._runtime_patch
+
+    def clear_runtime_patch(self):
+        self._runtime_patch = None
+        self._runtime_final_latent = None
+
+    def step_runtime_patch(self, optimizer_name, lr, max_delta):
+        if self.patch_generator is None:
+            return
+        if self._runtime_patch is None or self._runtime_final_latent is None:
+            raise RuntimeError("No runtime diffusion patch is prepared for the current step")
+        if self._runtime_patch.grad is None:
+            raise RuntimeError("Runtime diffusion patch has no gradients")
+
+        self.patch_generator.step(
+            self._runtime_final_latent,
+            self._runtime_patch.grad,
+            optimizer_name=optimizer_name,
+            lr=lr,
+            max_delta=max_delta,
+        )
+        self.clear_runtime_patch()
 
 
     @staticmethod
@@ -467,6 +525,7 @@ class PatchAdversary(torch.nn.Module):
         if self.random_location:
             scale = self.scale
             angle = self.angle
+            current_patch = self.get_P(Mask=False)
 
             # Initialize Transformations
             scale = torch.rand((1,)).item() * (scale[1] - scale[0]) + scale[0] \
@@ -477,18 +536,18 @@ class PatchAdversary(torch.nn.Module):
 
             # Apply Transformations
             if angle != 0 and scale != 1:
-                P_rot = tvf.rotate(self.P, angle)
+                P_rot = tvf.rotate(current_patch, angle)
                 P_res = tvf.resize(
                     P_rot, (int(scale * P_rot.size(2)), int(scale * P_rot.size(3))))
                 M = tvf.rotate(self.M, angle)
                 M = tvf.resize(
                     M, (int(scale * M.size(2)), int(scale * M.size(3))))
             else:
-                P_res = self.P
+                P_res = current_patch
                 M = self.M
         else:
             # Skip transformations
-            P_res = self.P
+            P_res = self.get_P(Mask=False)
             M = self.M
 
         # Initialize pos, patch, and patch size

@@ -180,6 +180,12 @@ def train_patch_ptlflow(
     import numpy as np
     from itertools import islice
 
+    patch_generator = None
+    if getattr(args, "patch_parametrization", "pixel") == "diffusion":
+        from .diffusion_patch import build_diffusion_patch_generator
+
+        patch_generator = build_diffusion_patch_generator(args, device)
+
     # adversary
     A = PatchAdversary(
         None,
@@ -189,28 +195,32 @@ def train_patch_ptlflow(
         change_of_variable=args.change_of_variables,
         random_location=args.random_loc,
         image_size=(375, 1242), 
-        ellipse_scale_y=args.y_scale
+        ellipse_scale_y=args.y_scale,
+        patch_generator=patch_generator,
     ).to(device)
+    use_diffusion_patch = A.uses_diffusion_patch()
 
     depth_loader, _ = prepare_dataloader(
         dataset_name=args.dataset, small_run=args.small_run,
         subset_size=getattr(args, 'subset_size', 0))
 
     # optimizer
-    if args.optimizer == "adam":
-        optimizer = optim.Adam(A.parameters(), lr=args.lr)
-    elif args.optimizer == "sgd":
-        optimizer = optim.SGD(A.parameters(), lr=args.lr, momentum=0.9)
-    elif args.optimizer == "clipped-pgd":
-        optimizer = ClippedPGD(A.parameters(), lr=args.lr,
-                               min_=0, max_=1, max_delta=args.max_delta)
-    elif args.optimizer == "ifgsm":
-        if args.change_of_variables:
-            optimizer = IFGSM(A.parameters(), lr=args.lr, min_=-100, max_=100)
+    optimizer = None
+    if not use_diffusion_patch:
+        if args.optimizer == "adam":
+            optimizer = optim.Adam(A.parameters(), lr=args.lr)
+        elif args.optimizer == "sgd":
+            optimizer = optim.SGD(A.parameters(), lr=args.lr, momentum=0.9)
+        elif args.optimizer == "clipped-pgd":
+            optimizer = ClippedPGD(A.parameters(), lr=args.lr,
+                                   min_=0, max_=1, max_delta=args.max_delta)
+        elif args.optimizer == "ifgsm":
+            if args.change_of_variables:
+                optimizer = IFGSM(A.parameters(), lr=args.lr, min_=-100, max_=100)
+            else:
+                optimizer = IFGSM(A.parameters(), lr=args.lr, min_=0, max_=1)
         else:
-            optimizer = IFGSM(A.parameters(), lr=args.lr, min_=0, max_=1)
-    else:
-        raise ValueError(f"Unknown optimizer: {args.optimizer}")
+            raise ValueError(f"Unknown optimizer: {args.optimizer}")
 
     # defense
     D = None
@@ -482,7 +492,10 @@ def train_patch_ptlflow(
                 W = torch.ones(n_tasks, device=device) / n_tasks
 
             for inner_step in range(args.steps):
-                optimizer.zero_grad()
+                if use_diffusion_patch:
+                    A.prepare_runtime_patch()
+                else:
+                    optimizer.zero_grad()
 
                 # --- патч-проекция / текстурирование по плоскости дороги ---
                 if args.patch_projection:
@@ -641,11 +654,13 @@ def train_patch_ptlflow(
                     ss_cons_loss = torch.tensor(0.0, device=device)
 
                 # --- TV loss (skip when weight is 0) ---
-                tv_loss = total_variation_loss(A.P, tv_w) if tv_w > 0.0 \
+                current_patch = A.get_P(Mask=False)
+
+                tv_loss = total_variation_loss(current_patch, tv_w) if tv_w > 0.0 \
                     else torch.tensor(0.0, device=device)
 
                 # --- Printability (NPS) loss (skip when weight is 0) ---
-                nps_loss = printability_loss(A.P, nps_w) if nps_w > 0.0 \
+                nps_loss = printability_loss(current_patch, nps_w) if nps_w > 0.0 \
                     else torch.tensor(0.0, device=device)
 
                 # --- Resolve per-task weights for this step ------
@@ -671,7 +686,14 @@ def train_patch_ptlflow(
                 )
 
                 total_loss.backward()
-                optimizer.step()
+                if use_diffusion_patch:
+                    A.step_runtime_patch(
+                        optimizer_name=args.diffusion_optimizer,
+                        lr=args.lr,
+                        max_delta=args.max_delta,
+                    )
+                else:
+                    optimizer.step()
 
                 # --- Inner minimisation: update w  (Alg.1 step 4, Eq.4) ---
                 # Guo et al. ICASSP 2025, Eq.2:
@@ -741,7 +763,7 @@ def train_patch_ptlflow(
                         metrics_tracker.log_metric("w_mde", float(mde_w) if isinstance(mde_w, float) else float(mde_w.item()), step=step)
                         metrics_tracker.log_metric("w_ss", float(ss_w) if isinstance(ss_w, float) else float(ss_w.item()), step=step)
                 # clamp patch values
-                if (not args.change_of_variables) and args.optimizer not in ["ifgsm", "pgd"]:
+                if (not use_diffusion_patch) and (not args.change_of_variables) and args.optimizer not in ["ifgsm", "pgd"]:
                     with torch.no_grad():
                         A.P.clamp_(0, 1)
 
