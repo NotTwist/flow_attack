@@ -39,17 +39,25 @@ def avg_epe(flow1, flow2, mask=None):
         ValueError: dimensons not valid
 
     Returns:
-        float: scalar average endpoint error 
+        float: scalar average endpoint error
     """
     diff_squared = (flow1 - flow2)**2
-    if mask is not None:
-        diff_squared = torch.where(mask == 1, diff_squared, 0)
     if len(diff_squared.size()) == 3:
-        # here, dim=0 is the 2-dimension (u and v direction of flow [2,M,N]) , which needs to be added BEFORE taking the square root. To get the length of a flow vector, we need to do sqrt(u_ij^2 + v_ij^2)
-        epe = torch.mean(torch.sum(diff_squared, dim=0).sqrt())
+        epe_map = torch.sum(diff_squared, dim=0).sqrt()  # [H,W]
+        if mask is not None:
+            m = (mask == 1).float().squeeze()
+            epe = (epe_map * m).sum() / m.sum().clamp_min(EPS)
+        else:
+            epe = epe_map.mean()
     elif len(diff_squared.size()) == 4:
-        # here, dim=0 is the 2-dimension (u and v direction of flow [b,2,M,N]) , which needs to be added BEFORE taking the square root. To get the length of a flow vector, we need to do sqrt(u_ij^2 + v_ij^2)
-        epe = torch.mean(torch.sum(diff_squared, dim=1).sqrt())
+        epe_map = torch.sum(diff_squared, dim=1).sqrt()  # [B,H,W]
+        if mask is not None:
+            m = (mask == 1).float()
+            if m.dim() == 4:
+                m = m.squeeze(1)
+            epe = (epe_map * m).sum() / m.sum().clamp_min(EPS)
+        else:
+            epe = epe_map.mean()
     else:
         raise ValueError("The flow tensors for which the EPE should be computed do not have a valid number of dimensions (either [b,2,M,N] or [2,M,N]). Here: " + str(
             flow1.size()) + " and " + str(flow1.size()))
