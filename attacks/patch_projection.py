@@ -636,43 +636,26 @@ def project_patch_on_scene(
         planes
     )
 
-def random_tilt_plane(plane, max_angle_deg=5.0):
+def random_tilt_plane(planes, max_angle_deg=5.0):
     """
-    Добавляет небольшой случайный наклон нормали плоскости.
-    plane: tensor [B,4] or [4]
-    max_angle_deg: максимальный угол наклона в градусах
+    planes: list of (normal:[3], d:scalar) tuples as returned by fit_plane_from_depth.
+    Returns a new list with each normal randomly tilted by up to max_angle_deg degrees
+    (Rodrigues rotation around a random axis). d is unchanged.
     """
-    if plane.ndim == 1:
-        plane = plane.unsqueeze(0)  # → [1,4]
-
-    B = plane.shape[0]
-    device = plane.device
     max_angle = max_angle_deg * torch.pi / 180.0
+    result = []
+    for normal, d in planes:
+        device = normal.device
+        n = normal / (normal.norm() + 1e-9)
 
-    # исходная нормаль
-    n = plane[:, :3]
-    n = n / (n.norm(dim=1, keepdim=True) + 1e-9)
+        k = torch.randn(3, device=device)
+        k = k / (k.norm() + 1e-9)
 
-    # случайные векторы
-    rand_vec = torch.randn((B, 3), device=device)
-    rand_vec = rand_vec / (rand_vec.norm(dim=1, keepdim=True) + 1e-9)
+        angle = (torch.rand(1, device=device) * 2 - 1) * max_angle
+        cos = torch.cos(angle)
+        sin = torch.sin(angle)
 
-    # случайные углы
-    angles = (torch.rand(B, 1, device=device) * 2 - 1) * max_angle  # [-max_angle, max_angle]
-
-    # формула вращения вектора вокруг случайной оси: Rodrigues rotation
-    k = rand_vec
-    k = k / (k.norm(dim=1, keepdim=True) + 1e-9)
-
-    cos = torch.cos(angles)
-    sin = torch.sin(angles)
-
-    n_rot = (
-        n * cos +
-        torch.cross(k, n, dim=1) * sin +
-        k * (torch.sum(k * n, dim=1, keepdim=True) * (1 - cos))
-    )
-
-    # пересборка плоскости (d оставляем прежним)
-    new_plane = torch.cat([n_rot, plane[:, 3:].clone()], dim=1)
-    return new_plane
+        n_rot = n * cos + torch.cross(k, n) * sin + k * (torch.dot(k, n) * (1 - cos))
+        n_rot = n_rot / (n_rot.norm() + 1e-9)
+        result.append((n_rot, d))
+    return result

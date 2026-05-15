@@ -372,10 +372,16 @@ def train_patch_ptlflow(
     # For 'minmax' strategy we maintain a weight vector on the probability
     # simplex P = {w | sum(w)=1, w_i>=0}.  Algorithm 1, Guo et al. ICASSP 2025.
     # Initialised to uniform w^(0) = 1/k as in the paper.
+    # W persists across batches and epochs so updates accumulate.
+    # A per-task EMA normalises raw loss values before the weight update so
+    # that tasks with different absolute scales (e.g. depth in metres vs.
+    # cross-entropy) are treated on equal footing.
     if weight_strategy == "minmax":
         W = torch.ones(n_tasks, device=device) / n_tasks
         alpha_w = getattr(args, "minmax_alpha_w", 0.03)   # α₂ in Eq.4
         gamma_w = getattr(args, "minmax_gamma", 5.0)      # γ  in Eq.2
+        loss_ema = torch.ones(n_tasks, device=device)     # running scale estimate
+        ema_momentum = 0.99
 
     # коэффициенты для outside-consistency 
     flow_cons_w = getattr(args, "flow_cons_w", 0)
@@ -561,9 +567,7 @@ def train_patch_ptlflow(
                 mde_w = mde_w_init / L_mde_clean.item()
                 ss_w = ss_w_init / L_ss_clean.item()
 
-            elif weight_strategy == "minmax":
-                # Reset to uniform at the start of each batch
-                W = torch.ones(n_tasks, device=device) / n_tasks
+            # (minmax: W persists across batches — no reset here)
 
             for inner_step in range(args.steps):
                 diffusion_step_stats = None
@@ -799,7 +803,12 @@ def train_patch_ptlflow(
                             elif t == "ss":
                                 task_losses.append(ss_adv_loss.detach())
                         L_vec = torch.stack(task_losses)
-                        grad_w = L_vec - gamma_w * (W - 1.0 / n_tasks)
+                        # Normalise by per-task EMA so tasks on different
+                        # absolute scales (depth metres vs. cross-entropy)
+                        # contribute equally to the weight gradient.
+                        loss_ema = ema_momentum * loss_ema + (1 - ema_momentum) * L_vec
+                        L_vec_norm = L_vec / (loss_ema + 1e-8)
+                        grad_w = L_vec_norm - gamma_w * (W - 1.0 / n_tasks)
                         W = project_simplex(W + alpha_w * grad_w)
 
                 step = epoch * len(data_loader) + batch_idx
