@@ -40,6 +40,7 @@ class DiffusionPatchGenerator(nn.Module):
         null_epsilon: float = 1e-5,
         seed: int = 42,
         diffusion_dtype: str = "auto",
+        decode_mode: str = "denoise",
     ):
         super().__init__()
 
@@ -55,6 +56,8 @@ class DiffusionPatchGenerator(nn.Module):
             raise ValueError("Image init mode requires --diffusion_base_image")
         if init_mode == "image" and not prompt:
             raise ValueError("Image init mode requires --diffusion_prompt for null-text optimization")
+        if decode_mode not in {"denoise", "direct"}:
+            raise ValueError(f"Unsupported diffusion decode mode: {decode_mode}")
 
         self.patch_size = patch_size
         self.model_name = model_name
@@ -69,11 +72,13 @@ class DiffusionPatchGenerator(nn.Module):
         self.null_inner_steps = int(null_inner_steps)
         self.null_epsilon = float(null_epsilon)
         self.seed = int(seed)
+        self.decode_mode = decode_mode
         self.height = DEFAULT_HEIGHT
         self.width = DEFAULT_WIDTH
         self.weight_dtype = self._resolve_weight_dtype(diffusion_dtype)
         self.latent_dtype = torch.float32
         self._adam_t = 0
+        self.last_step_stats = {}
 
         self.pipeline, self.is_sdxl = self._load_pipeline(model_name, model_path)
         self._freeze_pipeline()
@@ -100,6 +105,25 @@ class DiffusionPatchGenerator(nn.Module):
             self.uncond_embeddings = None
         else:
             self.uncond_embeddings = [emb.to(self.device) for emb in uncond_embeddings]
+
+    @staticmethod
+    def _sanitize_tensor(x: torch.Tensor) -> torch.Tensor:
+        """Replace non-finite values and keep data in a safe numeric range."""
+        if not torch.isfinite(x).all():
+            x = torch.nan_to_num(x, nan=0.0, posinf=1.0, neginf=0.0)
+        return x
+
+    @staticmethod
+    def _finite_fraction(x: torch.Tensor) -> float:
+        if x.numel() == 0:
+            return 1.0
+        return float(torch.isfinite(x.detach()).float().mean().item())
+
+    @staticmethod
+    def _straight_through_clamp(x: torch.Tensor, min_value: float = 0.0, max_value: float = 1.0) -> torch.Tensor:
+        """Clamp in the forward pass while keeping identity gradients."""
+        clamped = x.clamp(min_value, max_value)
+        return x + (clamped - x).detach()
 
     def _resolve_weight_dtype(self, diffusion_dtype: str) -> torch.dtype:
         if self.device.type != "cuda":
@@ -305,6 +329,7 @@ class DiffusionPatchGenerator(nn.Module):
                 vae_input, return_dict=False
             )[0]
         image = image.div(2).add(0.5).clamp(0.0, 1.0)
+        image = self._sanitize_tensor(image)
 
         if output_size is not None and image.shape[-1] != output_size:
             image = F.interpolate(
@@ -665,25 +690,38 @@ class DiffusionPatchGenerator(nn.Module):
                 latents_cur = self._guided_diffusion_step(latents_cur, context, t)
         return latents_cur
 
+    @torch.no_grad()
+    def _render_latent_no_grad(self) -> torch.Tensor:
+        start_latent = self._current_start_latent()
+        if self.decode_mode == "direct":
+            return self._sanitize_tensor(start_latent)
+        final_latent = self._denoise_latents(start_latent)
+        return self._sanitize_tensor(final_latent)
+
     def render_patch_for_optimization(self) -> Tuple[torch.Tensor, torch.Tensor]:
         with torch.no_grad():
-            final_latent = self._denoise_latents(self._current_start_latent())
+            final_latent = self._render_latent_no_grad()
             patch = self._decode_latents(final_latent, output_size=self.patch_size)
+        patch = self._sanitize_tensor(patch)
         patch = patch.detach().to(self.device, dtype=torch.float32).requires_grad_(True)
         return patch, final_latent.detach()
 
     @torch.no_grad()
     def render_patch(self) -> torch.Tensor:
-        final_latent = self._denoise_latents(self._current_start_latent())
-        return self._decode_latents(final_latent, output_size=self.patch_size).to(
+        final_latent = self._render_latent_no_grad()
+        out = self._decode_latents(final_latent, output_size=self.patch_size).to(
             self.device, dtype=torch.float32
         )
+        return self._sanitize_tensor(out)
 
     def latent_grad_from_patch_grad(
         self,
         final_latent: torch.Tensor,
         patch_grad: torch.Tensor,
     ) -> torch.Tensor:
+        patch_grad = torch.nan_to_num(
+            patch_grad.detach(), nan=0.0, posinf=0.0, neginf=0.0
+        )
         with torch.enable_grad():
             latent = final_latent.detach().clone().to(self.device, dtype=self.latent_dtype)
             latent.requires_grad_(True)
@@ -711,7 +749,8 @@ class DiffusionPatchGenerator(nn.Module):
                     )
                     decoded_patch = vae.decode(vae_input, return_dict=False)[0]
 
-                decoded_patch = decoded_patch.div(2).add(0.5).clamp(0.0, 1.0)
+                decoded_patch = self._straight_through_clamp(decoded_patch.div(2).add(0.5))
+                decoded_patch = self._sanitize_tensor(decoded_patch)
                 if decoded_patch.shape[-1] != self.patch_size:
                     decoded_patch = F.interpolate(
                         decoded_patch,
@@ -728,6 +767,7 @@ class DiffusionPatchGenerator(nn.Module):
             finally:
                 if needs_upcast:
                     vae.to(dtype=original_dtype)
+        latent_grad = self._sanitize_tensor(latent_grad)
         return latent_grad.detach().to(self.device, dtype=self.latent_dtype)
 
     @torch.no_grad()
@@ -740,7 +780,15 @@ class DiffusionPatchGenerator(nn.Module):
         lr: float,
         max_delta: float,
     ):
-        latent_grad = self.latent_grad_from_patch_grad(final_latent, patch_grad)
+        patch_grad_finite_fraction = self._finite_fraction(patch_grad)
+        clean_patch_grad = torch.nan_to_num(
+            patch_grad.detach(), nan=0.0, posinf=0.0, neginf=0.0
+        )
+        latent_grad = self.latent_grad_from_patch_grad(final_latent, clean_patch_grad)
+        old_delta = self.delta.detach().clone()
+        patch_grad_norm = float(clean_patch_grad.float().norm().item())
+        latent_grad_norm = float(latent_grad.detach().float().norm().item())
+        latent_grad_finite_fraction = self._finite_fraction(latent_grad)
 
         if optimizer_name == "adam":
             self._adam_t += 1
@@ -765,6 +813,28 @@ class DiffusionPatchGenerator(nn.Module):
         if self.latent_eps > 0:
             self.delta.data.clamp_(-self.latent_eps, self.latent_eps)
 
+        delta_change = self.delta.detach() - old_delta
+        abs_delta = self.delta.detach().abs()
+        if self.latent_eps > 0:
+            eps_hit_fraction = float((abs_delta >= (0.999 * self.latent_eps)).float().mean().item())
+        else:
+            eps_hit_fraction = 0.0
+        self.last_step_stats = {
+            "patch_grad_norm": patch_grad_norm,
+            "latent_grad_norm": latent_grad_norm,
+            "patch_grad_finite_fraction": patch_grad_finite_fraction,
+            "latent_grad_finite_fraction": latent_grad_finite_fraction,
+            "delta_update_norm": float(delta_change.float().norm().item()),
+            "delta_update_max_abs": float(delta_change.abs().max().item()),
+            "delta_norm": float(self.delta.detach().float().norm().item()),
+            "delta_mean_abs": float(abs_delta.float().mean().item()),
+            "delta_max_abs": float(abs_delta.max().item()),
+            "delta_eps_hit_fraction": eps_hit_fraction,
+            "latent_eps": float(self.latent_eps),
+            "adam_t": int(self._adam_t),
+        }
+        return self.last_step_stats
+
 
 def build_diffusion_patch_generator(args, device) -> Optional[DiffusionPatchGenerator]:
     if getattr(args, "patch_parametrization", "pixel") != "diffusion":
@@ -786,4 +856,5 @@ def build_diffusion_patch_generator(args, device) -> Optional[DiffusionPatchGene
         null_epsilon=args.diffusion_null_epsilon,
         seed=args.diffusion_seed,
         diffusion_dtype=args.diffusion_dtype,
+        decode_mode=getattr(args, "diffusion_decode_mode", "denoise"),
     )

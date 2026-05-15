@@ -178,6 +178,108 @@ def quickvis_flow(flow, filename, auto_scale=True, max_scale=-1):
         data.save(filename)
 
 
+def _to_numpy_image(image):
+    """Convert CHW/BCHW tensor-like image to RGB float numpy in [0, 1]."""
+    if torch.is_tensor(image):
+        image = image.detach().cpu().float().numpy()
+    image = np.asarray(image, dtype=np.float32)
+
+    if image.ndim == 4:
+        image = image[0]
+    if image.ndim == 3 and image.shape[0] in (1, 3):
+        image = np.transpose(image, (1, 2, 0))
+    if image.ndim == 2:
+        image = image[:, :, None]
+    if image.shape[-1] == 1:
+        image = np.repeat(image, 3, axis=-1)
+
+    image = np.nan_to_num(image, nan=0.0, posinf=1.0, neginf=0.0)
+    min_v, max_v = float(image.min()), float(image.max())
+    if min_v < 0.0 or max_v > 1.0:
+        image = (image - min_v) / (max_v - min_v + 1e-8)
+    return np.clip(image, 0.0, 1.0)
+
+
+def _to_numpy_flow(flow):
+    if torch.is_tensor(flow):
+        flow = flow.detach().cpu().float().numpy()
+    flow = np.asarray(flow, dtype=np.float32)
+    if flow.ndim == 4:
+        flow = flow[0]
+    if flow.ndim != 3 or flow.shape[0] != 2:
+        raise ValueError(f"Expected flow with shape [2,H,W] or [1,2,H,W], got {flow.shape}")
+    return np.transpose(np.nan_to_num(flow, nan=0.0, posinf=0.0, neginf=0.0), (1, 2, 0))
+
+
+def _to_numpy_map(value):
+    if torch.is_tensor(value):
+        value = value.detach().cpu().float().numpy()
+    value = np.asarray(value, dtype=np.float32)
+    if value.ndim == 4:
+        value = value[0]
+    if value.ndim == 3 and value.shape[0] == 1:
+        value = value[0]
+    elif value.ndim == 3 and value.shape[-1] == 1:
+        value = value[..., 0]
+    while value.ndim > 2:
+        value = value[0]
+    return np.nan_to_num(value, nan=0.0, posinf=0.0, neginf=0.0)
+
+
+def save_flow_pair_common_scale(clean_flow, attacked_flow, filename):
+    """Save clean/attacked flow side by side using one shared color scale."""
+    clean = _to_numpy_flow(clean_flow)
+    attacked = _to_numpy_flow(attacked_flow)
+    max_scale = float(max(
+        np.linalg.norm(clean, axis=-1).max(),
+        np.linalg.norm(attacked, axis=-1).max(),
+        1e-8,
+    ))
+    clean_img = colorplot_light(clean, auto_scale=False, max_scale=max_scale, return_max=False)
+    attacked_img = colorplot_light(attacked, auto_scale=False, max_scale=max_scale, return_max=False)
+    pair = np.concatenate([clean_img, attacked_img], axis=1).astype(np.uint8)
+    if os.path.dirname(filename):
+        os.makedirs(os.path.dirname(filename), exist_ok=True)
+    Image.fromarray(pair).save(filename)
+
+
+def save_depth_pair_common_scale(clean_depth, attacked_depth, filename):
+    """Save clean/attacked depth side by side with one min/max normalization."""
+    clean = _to_numpy_map(clean_depth)
+    attacked = _to_numpy_map(attacked_depth)
+    min_v = float(min(clean.min(), attacked.min()))
+    max_v = float(max(clean.max(), attacked.max()))
+
+    def norm(x):
+        return ((x - min_v) / (max_v - min_v + 1e-8) * 255).clip(0, 255).astype(np.uint8)
+
+    pair = np.concatenate([norm(clean), norm(attacked)], axis=1)
+    if os.path.dirname(filename):
+        os.makedirs(os.path.dirname(filename), exist_ok=True)
+    Image.fromarray(pair).save(filename)
+
+
+def save_mask_overlay_pair(clean_image, attacked_image, mask, filename, color=(255, 64, 64), alpha=0.45):
+    """Save clean/attacked image pair with the same semi-transparent mask overlay."""
+    clean = _to_numpy_image(clean_image)
+    attacked = _to_numpy_image(attacked_image)
+    mask_np = _to_numpy_map(mask)
+    mask_np = (mask_np > 0.5).astype(np.float32)
+    if mask_np.shape != clean.shape[:2]:
+        mask_np = cv2.resize(mask_np, (clean.shape[1], clean.shape[0]), interpolation=cv2.INTER_NEAREST)
+    mask_np = mask_np[:, :, None]
+    overlay_color = np.asarray(color, dtype=np.float32) / 255.0
+
+    def overlay(image):
+        out = image * (1.0 - alpha * mask_np) + overlay_color * (alpha * mask_np)
+        return (out * 255).clip(0, 255).astype(np.uint8)
+
+    pair = np.concatenate([overlay(clean), overlay(attacked)], axis=1)
+    if os.path.dirname(filename):
+        os.makedirs(os.path.dirname(filename), exist_ok=True)
+    Image.fromarray(pair).save(filename)
+
+
 # from flowbench
 
 def get_image_tensors(input_dic: Dict[str, torch.Tensor], clone=False):

@@ -23,7 +23,7 @@ def parse_args():
                         help="Adversarial attack method to use.")
 
     parser.add_argument('--target', type=str, default='zero', choices=[
-                        'zero', 'neg_flow', 'untargeted', 'camera', 'scene', 'down'], help="Choose a target for an attack")
+                        'zero', 'neg_flow', 'untargeted', 'camera', 'scene', 'down', 'relative_down'], help="Choose a target for an attack")
 
     # Dataset selection argument
     parser.add_argument('--dataset', type=str, default='Kitti15', choices=['Kitti15', 'Sintel', 'carla'],
@@ -34,6 +34,8 @@ def parse_args():
                         help="Flag to run a smaller version of the dataset for testing purposes.")
     parser.add_argument('--subset_size', type=int, default=0,
                         help="Use a random subset of N images (0 = use all). More flexible than --small_run.")
+    parser.add_argument('--eval_mode', type=str, default='testing', choices=['training', 'testing'],
+                        help="Dataset split used for patch evaluation.")
 
     # Output directory for saving results
     parser.add_argument('--output_dir', type=str, default="experiment_data",
@@ -45,6 +47,10 @@ def parse_args():
     # Save artifacts flag
     parser.add_argument('--save_artifacts', action='store_true',
                         help="Flag to save artifacts such as images and flows.")
+    parser.add_argument('--save_diploma_artifacts', action='store_true',
+                        help="Save publication-ready before/after artifacts with shared normalization and mask overlays.")
+    parser.add_argument('--eval_artifact_limit', type=int, default=0,
+                        help="Maximum number of eval batches to save artifacts for. 0 = no limit when artifact saving is enabled.")
 
     # Num of steps for iterative attacks
     parser.add_argument('--steps', type=int, default=iterations,
@@ -90,7 +96,9 @@ def parse_args():
                         help="Neural network model to use for monocular depth estimation.")
 
     parser.add_argument('--mde_target', type=str, default='zero',
-                        choices=['zero', 'untargeted', 'infinite', 'scene', 'p90'], help="Choose a target for an mde attack")
+                        choices=['zero', 'zero_raw', 'untargeted', 'infinite', 'scene', 'p90', 'near', 'far'], help="Choose a target for an mde attack")
+    parser.add_argument('--mde_near_margin', type=float, default=0.1,
+                        help="Margin as fraction of per-image raw MDE range for near/far MDE targets.")
 
     parser.add_argument(
         "--loss_weights",
@@ -140,6 +148,15 @@ def parse_args():
     # patch attacks
     parser.add_argument('--trained_patch', type=str, default='',
                     help="Path to a trained patch (train new patch if empty)")
+    parser.add_argument('--save_patch_every', type=int, default=0,
+                        help="During patch training, save an intermediate patch PNG every N batches. 0 = only save each epoch.")
+    parser.add_argument('--patch_checkpoint_dir', type=str, default='',
+                        help="Directory for intermediate patch PNGs. Defaults to <output_dir>/patch_checkpoints.")
+
+    parser.add_argument('--baseline', action='store_true',
+                        help="Skip training and evaluate a fixed baseline patch: "
+                             "random noise for 'pixel' parametrization, "
+                             "diffusion_base_image for 'diffusion' parametrization")
 
     parser.add_argument('--patch_size', type=int, default=100,
                         help="Size of the adversarial patch")
@@ -218,6 +235,36 @@ def parse_args():
         "--flow_target_magnitude", type=float, default=1.0,
         help="Magnitude of the 'down' flow target vector (default 1.0).")
     parser.add_argument(
+        "--down_hinge_min_mag_ratio",
+        type=float,
+        default=0.8,
+        help="For target=down, minimum predicted flow magnitude as a fraction of --flow_target_magnitude.")
+    parser.add_argument(
+        "--down_loss",
+        type=str,
+        default="hinge",
+        choices=["hinge", "epe"],
+        help=(
+            "Flow loss used when --target down. "
+            "'hinge' penalizes near-zero flow collapse; 'epe' uses the standard configured flow loss to the down target."
+        ),
+    )
+    parser.add_argument(
+        "--down_hinge_horizontal_weight",
+        type=float,
+        default=0.1,
+        help="For target=down, weight for suppressing horizontal flow in the hinge loss.")
+    parser.add_argument(
+        "--down_hinge_magnitude_weight",
+        type=float,
+        default=0.5,
+        help="For target=down, weight for penalizing near-zero flow magnitude in the hinge loss.")
+    parser.add_argument(
+        "--down_hinge_vertical_weight",
+        type=float,
+        default=1.0,
+        help="For target=down, weight for the vertical margin term in the hinge loss.")
+    parser.add_argument(
         "--tv_weight",
         type=float,
         default=0,
@@ -270,6 +317,16 @@ def parse_args():
         default="auto",
         choices=["auto", "fp16", "fp32"],
         help="Precision for Stable Diffusion inference"
+    )
+    parser.add_argument(
+        "--diffusion_decode_mode",
+        type=str,
+        default="denoise",
+        choices=["denoise", "direct"],
+        help=(
+            "How to render the optimized diffusion latent. "
+            "'denoise' runs the DDIM reverse trajectory; 'direct' decodes the optimized latent directly."
+        )
     )
     parser.add_argument(
         "--diffusion_source_steps",

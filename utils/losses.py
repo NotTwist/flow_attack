@@ -8,15 +8,18 @@ EPS = 1e-8
 
 FLOAT_RE = re.compile(r"[-+]?\d*\.?\d+(?:[eE][-+]?\d+)?")
 
+def safe_sqrt(x, eps: float = EPS):
+    return torch.sqrt(torch.clamp(x, min=eps))
+
 def epe(flow1, flow2):
 
     diff_squared = (flow1 - flow2)**2
     if len(diff_squared.size()) == 3:
         # here, dim=0 is the 2-dimension (u and v direction of flow [2,M,N]) , which needs to be added BEFORE taking the square root. To get the length of a flow vector, we need to do sqrt(u_ij^2 + v_ij^2)
-        epe = torch.sum(diff_squared, dim=0).sqrt()
+        epe = safe_sqrt(torch.sum(diff_squared, dim=0))
     elif len(diff_squared.size()) == 4:
         # here, dim=0 is the 2-dimension (u and v direction of flow [b,2,M,N]) , which needs to be added BEFORE taking the square root. To get the length of a flow vector, we need to do sqrt(u_ij^2 + v_ij^2)
-        epe = torch.sum(diff_squared, dim=1).sqrt()
+        epe = safe_sqrt(torch.sum(diff_squared, dim=1))
     else:
         raise ValueError("The flow tensors for which the EPE should be computed do not have a valid number of dimensions (either [b,2,M,N] or [2,M,N]). Here: " + str(
             flow1.size()) + " and " + str(flow1.size()))
@@ -43,14 +46,14 @@ def avg_epe(flow1, flow2, mask=None):
     """
     diff_squared = (flow1 - flow2)**2
     if len(diff_squared.size()) == 3:
-        epe_map = torch.sum(diff_squared, dim=0).sqrt()  # [H,W]
+        epe_map = safe_sqrt(torch.sum(diff_squared, dim=0))  # [H,W]
         if mask is not None:
             m = (mask == 1).float().squeeze()
             epe = (epe_map * m).sum() / m.sum().clamp_min(EPS)
         else:
             epe = epe_map.mean()
     elif len(diff_squared.size()) == 4:
-        epe_map = torch.sum(diff_squared, dim=1).sqrt()  # [B,H,W]
+        epe_map = safe_sqrt(torch.sum(diff_squared, dim=1))  # [B,H,W]
         if mask is not None:
             m = (mask == 1).float()
             if m.dim() == 4:
@@ -187,20 +190,20 @@ def rmse(flow1, flow2, mask=None):
             # [2,H,W] -> sum over channel -> [H,W]
             d2 = torch.sum(diff_squared, dim=0)
             denom = m.sum().clamp_min(EPS)
-            return torch.sqrt(torch.sum(d2 * m) / denom)
+            return safe_sqrt(torch.sum(d2 * m) / denom)
         else:
             # [B,2,H,W] -> sum over channel -> [B,H,W]
             d2 = torch.sum(diff_squared, dim=1)
             denom = m.sum().clamp_min(EPS)
-            return torch.sqrt(torch.sum(d2 * m) / denom)
+            return safe_sqrt(torch.sum(d2 * m) / denom)
     else:
         # no mask: mean then sqrt
         if diff_squared.dim() == 3:
             d2 = torch.sum(diff_squared, dim=0)  # [H,W]
-            return torch.sqrt(torch.mean(d2))
+            return safe_sqrt(torch.mean(d2))
         else:
             d2 = torch.sum(diff_squared, dim=1)  # [B,H,W]
-            return torch.sqrt(torch.mean(d2))
+            return safe_sqrt(torch.mean(d2))
 
 def avg_mse(flow1, flow2, mask=None):
     """Computes mean squared error between two flow fields.
@@ -260,6 +263,51 @@ def f_cosim(pred, target, mask=None):
         float: scalar mean cosine similarity
     """
     return 1 - torch.sum(pred * target) / torch.sqrt(torch.sum(pred*pred)) * torch.sqrt(torch.sum(target*target))
+
+
+def down_hinge_loss(
+    pred,
+    target,
+    mask=None,
+    min_mag_ratio: float = 0.8,
+    horizontal_weight: float = 0.1,
+    magnitude_weight: float = 0.5,
+    vertical_weight: float = 1.0,
+):
+    """Directional hinge loss for absolute downward flow targets.
+
+    This is meant for target='down'. It avoids the failure mode where a large
+    patch collapses the flow prediction to zero: vertical flow below the target
+    and magnitude below a target-ratio margin are explicitly penalized.
+    """
+    pred_u = pred[:, 0:1]
+    pred_v = pred[:, 1:2]
+    target_u = target[:, 0:1].detach()
+    target_v = target[:, 1:2].detach()
+
+    target_mag = safe_sqrt(target_u.pow(2) + target_v.pow(2)).detach()
+    pred_mag = safe_sqrt(pred_u.pow(2) + pred_v.pow(2))
+
+    vertical = F.relu(target_v - pred_v).pow(2)
+    horizontal = (pred_u - target_u).abs()
+    min_mag = float(min_mag_ratio) * target_mag
+    magnitude = F.relu(min_mag - pred_mag).pow(2)
+
+    loss_map = (
+        float(vertical_weight) * vertical
+        + float(horizontal_weight) * horizontal
+        + float(magnitude_weight) * magnitude
+    )
+
+    if mask is not None:
+        m = (mask == 1).float()
+        if m.dim() == 3:
+            m = m.unsqueeze(1)
+        if m.shape[-2:] != loss_map.shape[-2:]:
+            m = F.interpolate(m, size=loss_map.shape[-2:], mode="nearest")
+        return (loss_map * m).sum() / m.sum().clamp_min(EPS)
+
+    return loss_map.mean()
 
 
 def two_norm_avg_delta(delta1, delta2):
@@ -413,6 +461,7 @@ def get_loss(
         "focal": focal_epe,
         "huber": huber_epe,
         "charbonnier": charbonnier_epe,
+        "down_hinge": down_hinge_loss,
     }
 
     specs = parse_loss_specs(f_type)

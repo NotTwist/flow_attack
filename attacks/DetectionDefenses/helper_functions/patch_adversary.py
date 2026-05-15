@@ -52,6 +52,7 @@ class PatchAdversary(torch.nn.Module):
         self.patch_generator = patch_generator
         self._runtime_patch = None
         self._runtime_final_latent = None
+        self.last_diffusion_step_stats = {}
 
         # Initialize Patch from random, filepath, tensor, or diffusion generator.
         if self.patch_generator is not None:
@@ -66,6 +67,10 @@ class PatchAdversary(torch.nn.Module):
             if P.endswith('.png'):
                 from PIL import Image
                 P = tvf.to_tensor(Image.open(P)).unsqueeze_(0)
+                if change_of_variable:
+                    # PNG stores rendered pixels 0.5*(tanh(P_raw)+1).
+                    # Recover unconstrained P_raw via inverse: atanh(2*pixel-1).
+                    P = torch.atanh((P.clamp(1e-6, 1 - 1e-6) * 2) - 1)
             elif P.endswith('.npy'):
                 P = torch.from_numpy(load_npy(P))
 
@@ -168,7 +173,7 @@ class PatchAdversary(torch.nn.Module):
         if self._runtime_patch.grad is None:
             raise RuntimeError("Runtime diffusion patch has no gradients")
 
-        self.patch_generator.step(
+        self.last_diffusion_step_stats = self.patch_generator.step(
             self._runtime_final_latent,
             self._runtime_patch.grad,
             optimizer_name=optimizer_name,
@@ -176,6 +181,7 @@ class PatchAdversary(torch.nn.Module):
             max_delta=max_delta,
         )
         self.clear_runtime_patch()
+        return self.last_diffusion_step_stats
 
 
     @staticmethod
@@ -565,10 +571,8 @@ class PatchAdversary(torch.nn.Module):
                      (y - h // 2), H - h - (y - h // 2)))
         M_glob = pad(M, ((x - w // 2), W - w - (x - w // 2),
                      (y - h // 2), H - h - (y - h // 2)))
-        if self.cov:
-            P_glob_cov = .5 * (torch.tanh(P_glob) + 1)
-        else:
-            P_glob_cov = torch.clamp(P_glob, 0.0, 1.0)
+        # get_P() already applies the cov transform, so P_glob is always in [0,1]
+        P_glob_cov = torch.clamp(P_glob, 0.0, 1.0)
 
         # Ceil patch to avoid black borders
         M_glob = torch.ceil(M_glob)
@@ -583,10 +587,7 @@ class PatchAdversary(torch.nn.Module):
                          (y2 - h // 2), H - h - (y2 - h // 2)))
             M_glob2 = pad(M, ((x - w // 2), W - w - (x - w // 2),
                          (y2 - h // 2), H - h - (y2 - h // 2)))
-            if self.cov:
-                P_glob_cov2 = .5 * (torch.tanh(P_glob2) + 1)
-            else:
-                P_glob_cov2 = torch.clamp(P_glob2, 0.0, 1.0)
+            P_glob_cov2 = torch.clamp(P_glob2, 0.0, 1.0)
             M_glob2 = torch.ceil(M_glob2)
             R2 = (1 - M_glob2) * I2 + P_glob_cov2 * M_glob2
         else:
@@ -600,7 +601,10 @@ class PatchAdversary(torch.nn.Module):
     def save_png(self, name):
         if os.path.dirname(name) and not os.path.exists(os.path.dirname(name)):
             os.makedirs(os.path.dirname(name))
-        tvf.to_pil_image(torch.clip(self.get_P(Mask=True), 0, 1)[0]).save(name)
+        patch_rgba = self.get_P(Mask=True)
+        if not torch.isfinite(patch_rgba).all():
+            patch_rgba = torch.nan_to_num(patch_rgba, nan=0.0, posinf=1.0, neginf=0.0)
+        tvf.to_pil_image(torch.clamp(patch_rgba, 0, 1)[0]).save(name)
 
 @torch.no_grad()
 def debug_plane_ellipse(rgb_tensor, K, p0, t1, t2, R=2.0, out_path="debug_plane_ellipse.png"):

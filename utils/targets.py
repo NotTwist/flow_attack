@@ -113,8 +113,25 @@ def down_flow(flow, magnitude=1.0):
     return torch.cat([u, v], dim=1)
 
 
+def relative_down_flow(flow, magnitude=1.0):
+    """Shift the clean flow target downward by a fixed amount.
+
+    Unlike down_flow(), this does not ask the model for an absolute flow of
+    (0, +magnitude). It asks for the clean flow plus a downward displacement,
+    so a near-zero prediction under the patch is not accidentally close unless
+    the clean flow itself is already near (0, -magnitude).
+    """
+    target = flow.detach().clone()
+    target[:, 1:2, :, :] = target[:, 1:2, :, :] + float(magnitude)
+    return target
+
+
 def zero_depth(depth):
     return torch.full_like(depth, 100)
+
+
+def zero_raw_depth(depth):
+    return torch.zeros_like(depth)
 
 
 def untargeted_depth(depth):
@@ -126,6 +143,34 @@ def infinite_depth(depth):
     # Use the maximum representable depth value or a large constant
     d_max = depth.detach().max()
     return torch.ones_like(depth) * d_max
+
+
+def near_raw_depth(depth, margin: float = 0.1):
+    """Target larger raw MDE values, interpreted as visually closer objects.
+
+    Depth-Anything-style relative outputs are not metric depth in this wrapper.
+    Empirically they are often inverse-depth-like: larger raw values correspond
+    to closer structures. This target is per-sample and slightly above the
+    current max, so minimising L1 pushes all masked pixels upward.
+    """
+    B = depth.shape[0]
+    flat = depth.detach().view(B, -1)
+    d_min = flat.min(dim=1).values.view(B, 1, 1, 1)
+    d_max = flat.max(dim=1).values.view(B, 1, 1, 1)
+    d_range = (d_max - d_min).clamp_min(1e-6)
+    target = d_max + float(margin) * d_range
+    return target.expand_as(depth)
+
+
+def far_raw_depth(depth, margin: float = 0.1):
+    """Target smaller raw MDE values, the opposite of near_raw_depth()."""
+    B = depth.shape[0]
+    flat = depth.detach().view(B, -1)
+    d_min = flat.min(dim=1).values.view(B, 1, 1, 1)
+    d_max = flat.max(dim=1).values.view(B, 1, 1, 1)
+    d_range = (d_max - d_min).clamp_min(1e-6)
+    target = d_min - float(margin) * d_range
+    return target.expand_as(depth)
 
 
 def scene_depth(depth, x, y):
@@ -170,7 +215,8 @@ def get_mde_target(
     flow_model=None,
     mde_model=None,
     device=None,
-    q: float = 0.9
+    q: float = 0.9,
+    near_margin: float = 0.1,
 ):
     """
     Возвращает функцию-таргет для глубины.
@@ -182,6 +228,10 @@ def get_mde_target(
         def target(depth):
             return zero_depth(depth)
 
+    elif target_name == 'zero_raw':
+        def target(depth):
+            return zero_raw_depth(depth)
+
     elif target_name == 'untargeted':
         def target(depth):
             return untargeted_depth(depth)
@@ -189,6 +239,14 @@ def get_mde_target(
     elif target_name == 'infinite':
         def target(depth):
             return infinite_depth(depth)
+
+    elif target_name == 'near':
+        def target(depth):
+            return near_raw_depth(depth, margin=near_margin)
+
+    elif target_name == 'far':
+        def target(depth):
+            return far_raw_depth(depth, margin=near_margin)
 
     elif target_name == 'scene':
         # здесь исходная сигнатура scene_depth(depth, x, y) —
@@ -296,6 +354,8 @@ def get_target(target_name, custom_target_path="", device=None, magnitude=1.0):
         target = scene_flow
     elif target_name == 'down':
         target = partial(down_flow, magnitude=magnitude)
+    elif target_name == 'relative_down':
+        target = partial(relative_down_flow, magnitude=magnitude)
     else:
         raise ValueError('The specified target type "' + target_name +
                          '" is not defined and cannot be used. Select one of "zero", "neg_flow" or "custom". Aborting.')

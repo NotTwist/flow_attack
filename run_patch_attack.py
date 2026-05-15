@@ -1,5 +1,6 @@
 import ptlflow.utils.io_adapter as io_adapter_lib
 import cv2
+import os
 import ptlflow.models
 import ptlflow.utils
 import ptlflow.utils.io_adapter
@@ -18,7 +19,7 @@ from attacks.patch_attack import train_patch_ptlflow
 import ptlflow
 import cv2 as cv2
 from utils.targets import get_target, get_mde_target, get_ss_target
-from attacks.DetectionDefenses.helper_functions.patch_adversary import PatchAdversary
+from attacks.DetectionDefenses.helper_functions.patch_adversary import PatchAdversary, circ_mask
 from attacks.patch_projection import (
     project_patch_on_scene,
     fit_plane_from_depth,
@@ -43,11 +44,53 @@ def load_model(model_name, dataset):
     return None
 
 
+def _make_baseline_patch(args, image_size, device):
+    """Return a fixed (non-optimized) PatchAdversary for baseline evaluation."""
+    import os
+    import torchvision.transforms.functional as tvf
+    from PIL import Image
+
+    size = args.patch_size
+    parametrization = getattr(args, 'patch_parametrization', 'pixel')
+
+    if parametrization == 'diffusion':
+        base_image_path = getattr(args, 'diffusion_base_image', '') or os.path.join(
+            os.path.dirname(__file__),
+            'attacks', 'adversarial_manhole', 'adversarial_example', 'full_manhole.png',
+        )
+        img = Image.open(base_image_path).convert('RGB')
+        rgb = tvf.to_tensor(img).unsqueeze(0)
+        rgb = torch.nn.functional.interpolate(rgb, size=(size, size), mode='bilinear', align_corners=False)
+    else:
+        rgb = torch.rand(1, 3, size, size)
+
+    mask = circ_mask(rgb)
+    patch_tensor = torch.cat([rgb, mask], dim=1)
+
+    patch = PatchAdversary(
+        patch_tensor,
+        size=size,
+        angle=0,
+        scale=1,
+        change_of_variable=args.change_of_variables,
+        random_location=args.random_loc,
+        image_size=image_size,
+        ellipse_scale_y=args.y_scale,
+    ).to(device)
+    patch.P.requires_grad_(False)
+    return patch
+
+
 def main():
     # Parse arguments using the separate args.py file
     args = parse_args()
 
     args.attack_type = "patch"
+    args.effective_flow_loss = (
+        "down_hinge"
+        if args.target == "down" and getattr(args, "down_loss", "hinge") == "hinge"
+        else ",".join(args.loss)
+    )
     # Set device
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Using device: {device}")
@@ -81,7 +124,8 @@ def main():
             flow_model=model,
             mde_model=mde_model,
             device=device,
-            q=0.9
+            q=0.9,
+            near_margin=getattr(args, "mde_near_margin", 0.1),
         )
 
     # Load semantic segmentation model (only when it will be attacked)
@@ -101,7 +145,13 @@ def main():
     reset_temporal_filters(temporal_filters)
 
     # Train new patch or use patch from args.trained_patch
-    if args.trained_patch == '':
+    if getattr(args, 'baseline', False):
+        label = 'random noise' if getattr(args, 'patch_parametrization', 'pixel') == 'pixel' else 'base image'
+        print(f"Baseline mode: using fixed {label} patch (no training).")
+        trained_patch = _make_baseline_patch(args, image_size, device)
+        os.makedirs(args.output_dir, exist_ok=True)
+        trained_patch.save_png(os.path.join(args.output_dir, "baseline_patch.png"))
+    elif args.trained_patch == '':
         print("Starting patch training...")
         train_tracker = AttackMetricsTracker(
             output_dir=args.output_dir,
@@ -124,13 +174,21 @@ def main():
                                        random_location=args.random_loc, image_size=image_size, ellipse_scale_y=args.y_scale).to(device)
 
     print("Evaluating trained patch...")
-    eval_loader, has_gt = prepare_dataloader(mode='testing',
-                                             dataset_name=args.dataset, small_run=args.small_run, n_images=1, has_depth=False)
+    eval_loader, has_gt = prepare_dataloader(mode=args.eval_mode,
+                                             dataset_name=args.dataset,
+                                             small_run=args.small_run,
+                                             subset_size=getattr(args, 'subset_size', 0),
+                                             n_images=1,
+                                             has_depth=False)
     eval_tracker = AttackMetricsTracker(
         output_dir=args.output_dir,
         experiment_name=args.experiment_name,
         args=args,
     )
+    try:
+        eval_tracker.save_artifact(trained_patch, "evaluated_patch", artifact_type="patch")
+    except Exception as e:
+        print(f"Warning: failed to log evaluated patch to MLflow: {e}")
     
     # Evaluate path on eval dataset
     for batch, (images, flow, valid, meta, K) in enumerate(tqdm(eval_loader)):
@@ -246,35 +304,53 @@ def main():
             original_seg=original_ss, attacked_seg=ss_pred, target_seg=ss_target
         )
 
-        # Always save eval artifacts for visualization
-        eval_tracker.save_artifact(
-            I1_batch, f"eval_{batch:04d}_clean_image", artifact_type="image")
-        eval_tracker.save_artifact(
-            attacked_image1, f"eval_{batch:04d}_attacked_image", artifact_type="image")
-        eval_tracker.save_artifact(
-            original_flow, f"eval_{batch:04d}_clean_flow", artifact_type="flow")
-        eval_tracker.save_artifact(
-            flow_pred, f"eval_{batch:04d}_attacked_flow", artifact_type="flow")
-        eval_tracker.save_artifact(
-            of_target, f"eval_{batch:04d}_target_flow", artifact_type="flow")
-        if mask is not None:
+        artifact_limit = int(getattr(args, "eval_artifact_limit", 0) or 0)
+        should_save_eval_artifacts = (
+            (getattr(args, "save_artifacts", False) or getattr(args, "save_diploma_artifacts", False))
+            and (artifact_limit <= 0 or batch < artifact_limit)
+        )
+
+        if getattr(args, "save_artifacts", False) and should_save_eval_artifacts:
             eval_tracker.save_artifact(
-                mask, f"eval_{batch:04d}_patch_mask", artifact_type="image")
-        if depth_pred is not None:
+                I1_batch, f"eval_{batch:04d}_clean_image", artifact_type="image")
             eval_tracker.save_artifact(
-                original_depth, f"eval_{batch:04d}_clean_depth", artifact_type="depth")
+                attacked_image1, f"eval_{batch:04d}_attacked_image", artifact_type="image")
             eval_tracker.save_artifact(
-                depth_pred, f"eval_{batch:04d}_attacked_depth", artifact_type="depth")
+                original_flow, f"eval_{batch:04d}_clean_flow", artifact_type="flow")
             eval_tracker.save_artifact(
-                torch.abs(original_depth - depth_pred),
-                f"eval_{batch:04d}_depth_diff", artifact_type="depth")
-        if args.attack_ss and ss_pred is not None:
+                flow_pred, f"eval_{batch:04d}_attacked_flow", artifact_type="flow")
             eval_tracker.save_artifact(
-                original_ss, f"eval_{batch:04d}_clean_ss", artifact_type="ss")
-            eval_tracker.save_artifact(
-                ss_pred, f"eval_{batch:04d}_attacked_ss", artifact_type="ss")
-            eval_tracker.save_artifact(
-                ss_target, f"eval_{batch:04d}_target_ss", artifact_type="ss")
+                of_target, f"eval_{batch:04d}_target_flow", artifact_type="flow")
+            if mask is not None:
+                eval_tracker.save_artifact(
+                    mask, f"eval_{batch:04d}_patch_mask", artifact_type="image")
+            if depth_pred is not None:
+                eval_tracker.save_artifact(
+                    original_depth, f"eval_{batch:04d}_clean_depth", artifact_type="depth")
+                eval_tracker.save_artifact(
+                    depth_pred, f"eval_{batch:04d}_attacked_depth", artifact_type="depth")
+                eval_tracker.save_artifact(
+                    torch.abs(original_depth - depth_pred),
+                    f"eval_{batch:04d}_depth_diff", artifact_type="depth")
+            if args.attack_ss and ss_pred is not None:
+                eval_tracker.save_artifact(
+                    original_ss, f"eval_{batch:04d}_clean_ss", artifact_type="ss")
+                eval_tracker.save_artifact(
+                    ss_pred, f"eval_{batch:04d}_attacked_ss", artifact_type="ss")
+                eval_tracker.save_artifact(
+                    ss_target, f"eval_{batch:04d}_target_ss", artifact_type="ss")
+
+        if getattr(args, "save_diploma_artifacts", False) and should_save_eval_artifacts:
+            eval_tracker.save_diploma_artifacts(
+                f"eval_{batch:04d}",
+                clean_image=I1_batch,
+                attacked_image=attacked_image1,
+                clean_flow=original_flow,
+                attacked_flow=flow_pred,
+                mask=mask,
+                clean_depth=original_depth,
+                attacked_depth=depth_pred,
+            )
                 
     eval_tracker.finalize()
 

@@ -1,8 +1,10 @@
 from metrics.attack_metrics import AttackMetricsTracker
 from utils.targets import get_target, get_mde_target, get_ss_target
-from utils.losses import get_mde_loss, get_ss_loss, get_loss
+from utils.losses import down_hinge_loss, get_mde_loss, get_ss_loss, get_loss
 from os import path as op
 import os
+import json
+import mlflow
 from tqdm import tqdm
 import torch
 import torch.optim as optim
@@ -75,7 +77,7 @@ def printability_loss(patch, nps_weight=1.0, grid_size=6):
 
     # --- 3. расстояние каждого пикселя до ближайшего печатаемого цвета ---
     diff = pixels.unsqueeze(1) - printable_colors.unsqueeze(0)  # [N, K, 3]
-    dist = torch.sqrt((diff ** 2).sum(dim=2))                   # [N, K]
+    dist = torch.sqrt((diff ** 2).sum(dim=2) + 1e-8)           # [N, K]
     min_dist, _ = dist.min(dim=1)                               # [N]
     return nps_weight * min_dist.mean()
 
@@ -186,6 +188,53 @@ def train_patch_ptlflow(
 
         patch_generator = build_diffusion_patch_generator(args, device)
 
+    patch_checkpoint_dir = (
+        getattr(args, "patch_checkpoint_dir", "")
+        or op.join(args.output_dir, "patch_checkpoints")
+    )
+    save_patch_every = max(0, int(getattr(args, "save_patch_every", 0)))
+
+    def save_patch_checkpoint(adversary, *, epoch_idx, batch_idx=None, step=None, label=None):
+        os.makedirs(patch_checkpoint_dir, exist_ok=True)
+        if label is None:
+            if batch_idx is None:
+                label = f"epoch_{epoch_idx + 1:03d}"
+            else:
+                label = f"epoch_{epoch_idx + 1:03d}_batch_{batch_idx + 1:04d}"
+                if step is not None:
+                    label += f"_step_{step:06d}"
+        path = op.join(patch_checkpoint_dir, f"patch_{label}.png")
+        adversary.save_png(path)
+        adversary.save_png(op.join(patch_checkpoint_dir, "latest.png"))
+        metadata = {
+            "format": "flow_attack_patch_checkpoint_v1",
+            "patch_path": path,
+            "latest_patch_path": op.join(patch_checkpoint_dir, "latest.png"),
+            "epoch": epoch_idx + 1,
+            "batch": None if batch_idx is None else batch_idx + 1,
+            "step": step,
+            "diffusion_step_stats": getattr(adversary, "last_diffusion_step_stats", {}),
+            "args": vars(args),
+            "eval_hint": {
+                "command": "python3 scripts/eval_patch_from_metadata.py --metadata <this_json>",
+                "description": "Loads training parameters needed for evaluation and runs run_patch_attack.py with --trained_patch.",
+            },
+        }
+        metadata_path = op.splitext(path)[0] + ".json"
+        with open(metadata_path, "w", encoding="utf-8") as f:
+            json.dump(metadata, f, indent=2, sort_keys=True)
+        with open(op.join(patch_checkpoint_dir, "latest.json"), "w", encoding="utf-8") as f:
+            json.dump({**metadata, "patch_path": op.join(patch_checkpoint_dir, "latest.png")}, f, indent=2, sort_keys=True)
+        if metrics_tracker is not None:
+            try:
+                mlflow.log_artifact(path, artifact_path="patch_checkpoints")
+                mlflow.log_artifact(metadata_path, artifact_path="patch_checkpoints")
+                mlflow.log_artifact(op.join(patch_checkpoint_dir, "latest.png"), artifact_path="patch_checkpoints_latest")
+                mlflow.log_artifact(op.join(patch_checkpoint_dir, "latest.json"), artifact_path="patch_checkpoints_latest")
+            except Exception as e:
+                print(f"Warning: failed to log patch checkpoint to MLflow: {e}")
+        return path
+
     # adversary
     A = PatchAdversary(
         None,
@@ -250,7 +299,22 @@ def train_patch_ptlflow(
     #     TF_ss = TemporalPredictionFilter(mode=mode, window_size=args.temp_window, sigma_color=args.sigma_color).to(device)
     # targets & losses for optical flow
     flow_target_fn = get_target(args.target, magnitude=args.flow_target_magnitude)
-    flow_loss_fn = get_loss(args.loss, untargeted=args.target == 'untargeted')
+    if args.target == 'down' and getattr(args, "down_loss", "hinge") == "hinge":
+        def flow_loss_fn(pred, target, mask_override=None, **kwargs):
+            return down_hinge_loss(
+                pred,
+                target,
+                mask=mask_override,
+                min_mag_ratio=getattr(args, "down_hinge_min_mag_ratio", 0.8),
+                horizontal_weight=getattr(args, "down_hinge_horizontal_weight", 0.1),
+                magnitude_weight=getattr(args, "down_hinge_magnitude_weight", 0.5),
+                vertical_weight=getattr(args, "down_hinge_vertical_weight", 1.0),
+            )
+
+        flow_loss_fn.specs = [("down_hinge", 1.0)]
+        flow_loss_fn.untargeted = False
+    else:
+        flow_loss_fn = get_loss(args.loss, untargeted=args.target == 'untargeted')
 
     # targets and losses for mde
     if args.attack_mde:
@@ -261,7 +325,8 @@ def train_patch_ptlflow(
             flow_model=model,
             mde_model=mde_model,
             device=device,
-            q=0.9
+            q=0.9,
+            near_margin=getattr(args, "mde_near_margin", 0.1),
         )
     else:
         mde_loss_fn = None
@@ -492,6 +557,7 @@ def train_patch_ptlflow(
                 W = torch.ones(n_tasks, device=device) / n_tasks
 
             for inner_step in range(args.steps):
+                diffusion_step_stats = None
                 if use_diffusion_patch:
                     A.prepare_runtime_patch()
                 else:
@@ -687,7 +753,7 @@ def train_patch_ptlflow(
 
                 total_loss.backward()
                 if use_diffusion_patch:
-                    A.step_runtime_patch(
+                    diffusion_step_stats = A.step_runtime_patch(
                         optimizer_name=args.diffusion_optimizer,
                         lr=args.lr,
                         max_delta=args.max_delta,
@@ -762,6 +828,27 @@ def train_patch_ptlflow(
                         metrics_tracker.log_metric("w_flow", float(flow_w) if isinstance(flow_w, float) else float(flow_w.item()), step=step)
                         metrics_tracker.log_metric("w_mde", float(mde_w) if isinstance(mde_w, float) else float(mde_w.item()), step=step)
                         metrics_tracker.log_metric("w_ss", float(ss_w) if isinstance(ss_w, float) else float(ss_w.item()), step=step)
+                    if diffusion_step_stats:
+                        for stat_name, stat_value in diffusion_step_stats.items():
+                            metrics_tracker.log_metric(
+                                f"diffusion_{stat_name}",
+                                float(stat_value),
+                                step=step,
+                            )
+
+                if (
+                    is_last_inner
+                    and save_patch_every > 0
+                    and ((batch_idx + 1) % save_patch_every == 0)
+                ):
+                    ckpt_path = save_patch_checkpoint(
+                        A,
+                        epoch_idx=epoch,
+                        batch_idx=batch_idx,
+                        step=step,
+                    )
+                    print(f"Saved intermediate patch checkpoint: {ckpt_path}")
+
                 # clamp patch values
                 if (not use_diffusion_patch) and (not args.change_of_variables) and args.optimizer not in ["ifgsm", "pgd"]:
                     with torch.no_grad():
@@ -808,11 +895,13 @@ def train_patch_ptlflow(
                 metrics_tracker.log_metric(f"epoch_avg_{key}", avg, step=epoch)
 
         # save patch
-        A.save_png(op.join(
-            args.output_dir, f"patch_{metrics_tracker.run_name}_{epoch+1}.png"))
+        epoch_patch_path = save_patch_checkpoint(A, epoch_idx=epoch)
+        if metrics_tracker is not None:
+            A.save_png(op.join(
+                args.output_dir, f"patch_{metrics_tracker.run_name}_{epoch+1}.png"))
         if metrics_tracker is not None and args.save_artifacts:
                 metrics_tracker.save_artifact(
                     A, f"{epoch+1}_patch", artifact_type="patch")
-        print(f"Saved patch for epoch {epoch+1}")
+        print(f"Saved patch for epoch {epoch+1}: {epoch_patch_path}")
 
     return A

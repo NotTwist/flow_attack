@@ -4,7 +4,14 @@ import numpy as np
 import mlflow
 import cv2
 from typing import Literal
-from utils.process_images import quickvis_flow, save_depth, save_segmentation
+from utils.process_images import (
+    quickvis_flow,
+    save_depth,
+    save_depth_pair_common_scale,
+    save_flow_pair_common_scale,
+    save_mask_overlay_pair,
+    save_segmentation,
+)
 from datetime import datetime
 from ptlflow.utils import flow_utils
 import cv2 as cv
@@ -53,9 +60,43 @@ class AttackMetricsTracker:
         self.saved_iterations = args.saved_iterations if args.saved_iterations else []
         self.reset()
 
+    @staticmethod
+    def _finite_float(value, default=0.0):
+        """Convert metric-like values to finite Python floats before MLflow logging."""
+        if torch.is_tensor(value):
+            if value.numel() == 0:
+                return default
+            value = torch.nan_to_num(value.detach().float(), nan=default, posinf=default, neginf=default).mean().item()
+        elif isinstance(value, np.ndarray):
+            if value.size == 0:
+                return default
+            value = np.nan_to_num(value.astype(np.float64), nan=default, posinf=default, neginf=default).mean()
+
+        try:
+            value = float(value)
+        except (TypeError, ValueError):
+            return default
+        return value if np.isfinite(value) else default
+
+    @staticmethod
+    def _contains_nonfinite(value):
+        if torch.is_tensor(value):
+            if value.numel() == 0:
+                return False
+            return not bool(torch.isfinite(value.detach()).all().item())
+        if isinstance(value, np.ndarray):
+            if value.size == 0:
+                return False
+            return not bool(np.isfinite(value).all())
+        try:
+            return not bool(np.isfinite(float(value)))
+        except (TypeError, ValueError):
+            return True
+
     def log_metric(self, name, value, step):
-        mlflow.log_metric(
-                   name, value, step)
+        if self._contains_nonfinite(value):
+            mlflow.log_metric(f"{name}_nonfinite", 1.0, step)
+        mlflow.log_metric(name, self._finite_float(value), step)
     
     def reset(self):
         """Reset cumulative metric values and counts."""
@@ -76,6 +117,9 @@ class AttackMetricsTracker:
             "iou_target_attack": 0.0,
             # Mean of per-task target-distance ratios (lower ⇒ stronger targeted attack)
             "multitask_robustness_score": 0.0,
+            "mrs_gamma_flow": 0.0,
+            "mrs_gamma_depth": 0.0,
+            "mrs_gamma_seg": 0.0,
         }
         self.count = 0
 
@@ -229,6 +273,8 @@ class AttackMetricsTracker:
             pred_depth = pred_depth.unsqueeze(1)
         if gt_depth.ndim == 3:
             gt_depth = gt_depth.unsqueeze(1)
+        pred_depth = torch.nan_to_num(pred_depth, nan=0.0, posinf=0.0, neginf=0.0)
+        gt_depth = torch.nan_to_num(gt_depth, nan=0.0, posinf=0.0, neginf=0.0)
 
         B = pred_depth.size(0)
 
@@ -237,6 +283,16 @@ class AttackMetricsTracker:
             mask = torch.ones_like(gt_depth, dtype=torch.bool)
         if mask.ndim == 3:
             mask = mask.unsqueeze(1)
+        mask = mask.to(device=pred_depth.device)
+        if mask.shape[0] == 1 and B > 1:
+            mask = mask.expand(B, -1, -1, -1)
+        if mask.shape[-2:] != pred_depth.shape[-2:]:
+            mask = F.interpolate(
+                mask.float(),
+                size=pred_depth.shape[-2:],
+                mode="nearest",
+            )
+        mask = mask > 0.5
 
         # squeeze channel dimension (B,1,H,W) -> (B,H,W)
         pred_depth = pred_depth.squeeze(1)
@@ -247,6 +303,9 @@ class AttackMetricsTracker:
         rmse_list = []
         for b in range(B):
             valid_mask = mask[b] 
+            if not valid_mask.any():
+                rmse_list.append(pred_depth[b].sum() * 0.0)
+                continue
             diff = pred_depth[b][valid_mask] - gt_depth[b][valid_mask]
             mse = (diff ** 2).mean()
             rmse_list.append(torch.sqrt(mse))
@@ -254,17 +313,47 @@ class AttackMetricsTracker:
         return torch.stack(rmse_list)
 
     def compute_depth_correlation(self, pred_depth: torch.Tensor, gt_depth: torch.Tensor, mask: torch.Tensor = None):
+        if pred_depth.ndim == 3:
+            pred_depth = pred_depth.unsqueeze(1)
+        if gt_depth.ndim == 3:
+            gt_depth = gt_depth.unsqueeze(1)
+        pred_depth = torch.nan_to_num(pred_depth, nan=0.0, posinf=0.0, neginf=0.0)
+        gt_depth = torch.nan_to_num(gt_depth, nan=0.0, posinf=0.0, neginf=0.0)
+
+        if mask is not None:
+            if mask.ndim == 3:
+                mask = mask.unsqueeze(1)
+            mask = mask.to(device=pred_depth.device)
+            if mask.shape[0] == 1 and pred_depth.shape[0] > 1:
+                mask = mask.expand(pred_depth.shape[0], -1, -1, -1)
+            if mask.shape[-2:] != pred_depth.shape[-2:]:
+                mask = F.interpolate(
+                    mask.float(),
+                    size=pred_depth.shape[-2:],
+                    mode="nearest",
+                )
+            mask = mask > 0.5
+        else:
+            mask = torch.ones_like(pred_depth, dtype=torch.bool)
+
         pred = pred_depth.detach().cpu().numpy().flatten()
         gt = gt_depth.detach().cpu().numpy().flatten()
+        mask_np = mask.detach().cpu().numpy().flatten().astype(bool)
+        pred = pred[mask_np]
+        gt = gt[mask_np]
 
-        # Apply mask if provided
-        if mask is not None:
-            mask = mask.detach().cpu().numpy().flatten().astype(bool)
-            pred = pred[mask]
-            gt = gt[mask]
+        if pred.size < 2 or gt.size < 2:
+            return 0.0, 0.0
+        if np.std(pred) < 1e-12 or np.std(gt) < 1e-12:
+            return 0.0, 0.0
+
         # print(pred.shape, gt_depth.shape)
         pearson_corr, _ = pearsonr(gt, pred)
         spearman_corr, _ = spearmanr(gt, pred)
+        if not np.isfinite(pearson_corr):
+            pearson_corr = 0.0
+        if not np.isfinite(spearman_corr):
+            spearman_corr = 0.0
         return pearson_corr, spearman_corr
         
     def compute_segmentation_attack_error(self, original_seg, attacked_seg, target_seg=None):
@@ -288,11 +377,12 @@ class AttackMetricsTracker:
             target_seg = target_seg.detach().cpu().numpy()
 
         # Error between original and attacked
-        ase_init_attack = np.mean(original_seg != attacked_seg)
+        ase_init_attack = self._finite_float(np.mean(original_seg != attacked_seg))
 
         # Error between attacked and target, if target exists
-        ase_target_attack = np.mean(
-            attacked_seg != target_seg) if target_seg is not None else 0.0
+        ase_target_attack = self._finite_float(
+            np.mean(attacked_seg != target_seg) if target_seg is not None else 0.0
+        )
 
         return {
             "ase_init_attack": ase_init_attack,
@@ -350,7 +440,7 @@ class AttackMetricsTracker:
 
                 max_iou = max(max_iou, iou)
         
-            return max_iou
+            return self._finite_float(max_iou if max_iou >= 0 else 0.0)
         
         for cls in range(num_classes):
                 
@@ -374,7 +464,7 @@ class AttackMetricsTracker:
         if len(ious) == 0:
             return 0.0
 
-        return float(np.mean(ious))
+        return self._finite_float(np.mean(ious))
 
     def compute_multitask_robustness_score(
         self,
@@ -410,7 +500,8 @@ class AttackMetricsTracker:
         ):
             num = float(self.compute_aee(attacked_flow, target_flow, mask))
             den = float(self.compute_aee(original_flow, target_flow, mask))
-            gammas.append(("flow", num / max(eps, den)))
+            gamma = self._finite_float(num / max(eps, den))
+            gammas.append(("flow", gamma))
 
         if (
             original_depth is not None
@@ -423,7 +514,8 @@ class AttackMetricsTracker:
             rmse_clean = float(
                 self.compute_rmse(original_depth, target_depth, mask).mean().item()
             )
-            gammas.append(("depth", rmse_adv / max(eps, rmse_clean)))
+            gamma = self._finite_float(rmse_adv / max(eps, rmse_clean))
+            gammas.append(("depth", gamma))
 
         if (
             original_seg is not None
@@ -439,14 +531,15 @@ class AttackMetricsTracker:
                 a = a.squeeze(0)
             if t.ndim == 4:
                 t = t.squeeze(0)
-            err_adv = float(np.mean(a != t))
-            err_clean = float(np.mean(o != t))
-            gammas.append(("seg", err_adv / max(eps, err_clean)))
+            err_adv = self._finite_float(np.mean(a != t))
+            err_clean = self._finite_float(np.mean(o != t))
+            gamma = self._finite_float(err_adv / max(eps, err_clean))
+            gammas.append(("seg", gamma))
 
         if not gammas:
             return None, {}
 
-        mrs = sum(g for _, g in gammas) / len(gammas)
+        mrs = self._finite_float(sum(g for _, g in gammas) / len(gammas))
         gamma_dict = {name: g for name, g in gammas}
         return mrs, gamma_dict
 
@@ -569,8 +662,11 @@ class AttackMetricsTracker:
     def update(self, original_flow, attacked_flow, original_img=None, second_img=None, gt_flow=None, target_flow=None, inverse_flow=None, mask=None, valid=None, tracked_flows=None, original_depth=None, attacked_depth=None, target_depth=None, tracked_depths=None, original_seg=None, attacked_seg=None, target_seg=None, tracked_segs=None):
         """Update metrics for the current batch."""
         aee_attack = self.compute_aee(original_flow, attacked_flow, mask)
-        aee_attack_target = self.compute_aee(
-            attacked_flow, target_flow, mask)
+        aee_attack_target = (
+            self.compute_aee(attacked_flow, target_flow, mask)
+            if target_flow is not None
+            else 0.0
+        )
         aee_clean_target = (
             self.compute_aee(original_flow, target_flow, mask)
             if target_flow is not None
@@ -590,7 +686,7 @@ class AttackMetricsTracker:
                 mask=mask
             )
             self.cumulative_metrics["reconstruction_error"] += rec_error
-            mlflow.log_metric("reconstruction_error", rec_error, step=self.count)
+            self.log_metric("reconstruction_error", rec_error, step=self.count)
         else:
             rec_error = 0.0
 
@@ -600,34 +696,30 @@ class AttackMetricsTracker:
             self.cumulative_metrics["mde_rmse_init_attack"] += float(
                 mde_rmse_attack.mean().item()
             )
-            mlflow.log_metric(
+            self.log_metric(
                 "mde_rmse_init_attack",
                 float(mde_rmse_attack.mean().item()),
                 step=self.count,
             )
-            mde_rmse_attack_target = self.compute_rmse(
-                attacked_depth, target_depth, mask
-            )
-            self.cumulative_metrics["mde_rmse_target_attack"] += float(
-                mde_rmse_attack_target.mean().item()
-            )
-            mlflow.log_metric(
-                "mde_rmse_target_attack",
-                float(mde_rmse_attack_target.mean().item()),
-                step=self.count,
-            )
             if target_depth is not None:
+                mde_rmse_attack_target = self.compute_rmse(
+                    attacked_depth, target_depth, mask
+                )
+                v_at = float(mde_rmse_attack_target.mean().item())
+                self.cumulative_metrics["mde_rmse_target_attack"] += v_at
+                self.log_metric("mde_rmse_target_attack", v_at, step=self.count)
+
                 mde_rmse_clean_target = self.compute_rmse(
                     original_depth, target_depth, mask
                 )
                 v_ct = float(mde_rmse_clean_target.mean().item())
                 self.cumulative_metrics["mde_rmse_clean_target"] += v_ct
-                mlflow.log_metric("mde_rmse_clean_target", v_ct, step=self.count)
+                self.log_metric("mde_rmse_clean_target", v_ct, step=self.count)
 
             pearson_corr, spearman_corr = self.compute_depth_correlation(original_depth, attacked_depth, mask)
-            mlflow.log_metric("mde_pearson_init_attack",
+            self.log_metric("mde_pearson_init_attack",
                               pearson_corr, step=self.count)
-            mlflow.log_metric("mde_spearman_init_attack",
+            self.log_metric("mde_spearman_init_attack",
                               spearman_corr, step=self.count)
         # Segmentation
         if original_seg is not None and attacked_seg is not None:
@@ -636,7 +728,7 @@ class AttackMetricsTracker:
             )
             for k, v in seg_metrics.items():
                 self.cumulative_metrics[k] += v
-                mlflow.log_metric(k, v, step=self.count)
+                self.log_metric(k, v, step=self.count)
                 
         if original_seg is not None and attacked_seg is not None and target_seg is not None:
             num_classes = int(max(original_seg.max(), attacked_seg.max(), target_seg.max()) + 1)
@@ -644,8 +736,8 @@ class AttackMetricsTracker:
             iou_init = self.compute_iou(original_seg, attacked_seg, num_classes, mask)
             iou_target = self.compute_iou(attacked_seg, target_seg, num_classes, mask, targeted=True, classes=[13])
 
-            mlflow.log_metric("iou_init_attack", iou_init, step=self.count)
-            mlflow.log_metric("iou_target_attack", iou_target, step=self.count)
+            self.log_metric("iou_init_attack", iou_init, step=self.count)
+            self.log_metric("iou_target_attack", iou_target, step=self.count)
 
             self.cumulative_metrics["iou_init_attack"] += iou_init
             self.cumulative_metrics["iou_target_attack"] += iou_target
@@ -667,6 +759,10 @@ class AttackMetricsTracker:
         )
         if mrs is not None:
             self.cumulative_metrics["multitask_robustness_score"] += mrs
+            for task_name, g in mrs_gammas.items():
+                key = f"mrs_gamma_{task_name}"
+                if key in self.cumulative_metrics:
+                    self.cumulative_metrics[key] += self._finite_float(g)
 
         # Update cumulative metrics
         self.cumulative_metrics["aee_init_attack"] += aee_attack
@@ -678,22 +774,22 @@ class AttackMetricsTracker:
         self.count += 1
 
         # Log main metrics
-        mlflow.log_metric("aee_init_attack", aee_attack, step=self.count)
-        mlflow.log_metric("aee_target_attack",
+        self.log_metric("aee_init_attack", aee_attack, step=self.count)
+        self.log_metric("aee_target_attack",
                           aee_attack_target, step=self.count)
         if target_flow is not None:
-            mlflow.log_metric("aee_clean_target", aee_clean_target, step=self.count)
+            self.log_metric("aee_clean_target", aee_clean_target, step=self.count)
 
         if gt_flow is not None:
-            mlflow.log_metric("aee_init_gt", aee_gt, step=self.count)
-            mlflow.log_metric("aee_attacked_gt",
+            self.log_metric("aee_init_gt", aee_gt, step=self.count)
+            self.log_metric("aee_attacked_gt",
                               aee_attacked_gt, step=self.count)
-            mlflow.log_metric("gt_diff_error", diff_error, step=self.count)
+            self.log_metric("gt_diff_error", diff_error, step=self.count)
 
         if mrs is not None:
-            mlflow.log_metric("multitask_robustness_score", mrs, step=self.count)
+            self.log_metric("multitask_robustness_score", mrs, step=self.count)
             for task_name, g in mrs_gammas.items():
-                mlflow.log_metric(f"mrs_gamma_{task_name}", g, step=self.count)
+                self.log_metric(f"mrs_gamma_{task_name}", g, step=self.count)
 
         # Process dynamically defined iterations
         if self.saved_iterations:
@@ -718,19 +814,19 @@ class AttackMetricsTracker:
                 else:
                     rec_error = 0.0
 
-                mlflow.log_metric(
+                self.log_metric(
                     f"aee_init_attack_step_{step}", aee_attack, step=self.count)
-                mlflow.log_metric(
+                self.log_metric(
                     f"aee_target_attack_step_{step}", aee_attack_target, step=self.count)
                 if gt_flow is not None:
-                    mlflow.log_metric(
+                    self.log_metric(
                         f"aee_gt_step_{step}", aee_gt, step=self.count)
-                    mlflow.log_metric(
+                    self.log_metric(
                         f"aee_attacked_gt_step_{step}", aee_attacked_gt, step=self.count)
-                    mlflow.log_metric(
+                    self.log_metric(
                         f"gt_diff_error_step_{step}", diff_error, step=self.count)
                 if inverse_flow is not None:
-                    mlflow.log_metric(
+                    self.log_metric(
                         f"reconstruction_error_step_{step}", rec_error, step=self.count)
 
                 # Update cumulative metrics dynamically
@@ -746,13 +842,14 @@ class AttackMetricsTracker:
                 if tracked_depths is not None:
                     attacked_depth = tracked_depths[step]
                     mde_rmse_attack = self.compute_rmse(original_depth, attacked_depth, mask)
-                    mlflow.log_metric( f"mde_rmse_init_attack_step_{step}", mde_rmse_attack, step=self.count)
-                    self.cumulative_metrics[f"mde_rmse_init_attack_step_{step}"] += mde_rmse_attack
+                    self.log_metric( f"mde_rmse_init_attack_step_{step}", mde_rmse_attack, step=self.count)
+                    self.cumulative_metrics[f"mde_rmse_init_attack_step_{step}"] += self._finite_float(mde_rmse_attack)
                     
-                    mde_rmse_attack_target = self.compute_rmse(
-                        attacked_depth, target_depth, mask)
-                    self.cumulative_metrics[f"mde_rmse_target_attack_step_{step}"] += mde_rmse_attack_target
-                    mlflow.log_metric(f"mde_rmse_target_attack_step_{step}", mde_rmse_attack_target, step=self.count)
+                    if target_depth is not None:
+                        mde_rmse_attack_target = self.compute_rmse(
+                            attacked_depth, target_depth, mask)
+                        self.cumulative_metrics[f"mde_rmse_target_attack_step_{step}"] += self._finite_float(mde_rmse_attack_target)
+                        self.log_metric(f"mde_rmse_target_attack_step_{step}", mde_rmse_attack_target, step=self.count)
                     
                 if tracked_segs is not None:
                     attacked_seg_step = tracked_segs[step]
@@ -762,7 +859,7 @@ class AttackMetricsTracker:
                     for k, v in seg_metrics.items():
                         step_key = f"{k}_step_{step}"
                         self.cumulative_metrics[step_key] += v
-                        mlflow.log_metric(step_key, v, step=self.count)
+                        self.log_metric(step_key, v, step=self.count)
                         
         self.save_mean_metrics(step=self.count)
         
@@ -774,7 +871,7 @@ class AttackMetricsTracker:
         """
         if self.count == 0:
             return {}
-        return {k: v / self.count for k, v in self.cumulative_metrics.items()}
+        return {k: self._finite_float(v / self.count) for k, v in self.cumulative_metrics.items()}
 
     def save_mean_metrics(self, step):
         mean_metrics = self.get_mean_metrics()
@@ -782,7 +879,7 @@ class AttackMetricsTracker:
             print("No metrics to save.")
 
         for metric, value in mean_metrics.items():
-            mlflow.log_metric(f"mean_{metric}", value, step)
+            self.log_metric(f"mean_{metric}", value, step)
 
     def save_image(self, image, filename):
         if torch.is_tensor(image):
@@ -794,6 +891,8 @@ class AttackMetricsTracker:
                 image = np.transpose(image, (1, 2, 0))
 
         image = image.astype(np.float32)
+        # Guard against NaN/Inf coming from unstable model outputs.
+        image = np.nan_to_num(image, nan=0.0, posinf=1.0, neginf=0.0)
 
         if image.ndim == 2:
             image = image[:, :, None]
@@ -801,7 +900,9 @@ class AttackMetricsTracker:
             image = np.repeat(image, 3, axis=2)
 
         min_val, max_val = image.min(), image.max()
-        if min_val < 0.0 or max_val > 1.0:
+        if (max_val - min_val) < 1e-8:
+            image = np.clip(image, 0.0, 1.0)
+        elif min_val < 0.0 or max_val > 1.0:
             image = (image - min_val) / (max_val - min_val + 1e-8)
 
         image = (image * 255).clip(0, 255).astype(np.uint8)
@@ -839,6 +940,61 @@ class AttackMetricsTracker:
         mlflow.log_artifact(artifact_path)
         # print(f"Artifact saved to {artifact_path}")
 
+    def save_diploma_artifacts(
+        self,
+        name,
+        clean_image=None,
+        attacked_image=None,
+        clean_flow=None,
+        attacked_flow=None,
+        mask=None,
+        clean_depth=None,
+        attacked_depth=None,
+    ):
+        """Save paired before/after visualizations without running extra models."""
+        artifact_dir = os.path.join(self.output_dir, "diploma_artifacts")
+        os.makedirs(artifact_dir, exist_ok=True)
+
+        saved_paths = []
+
+        def save_raw(raw_name, value):
+            if value is None:
+                return
+            if torch.is_tensor(value):
+                arr = value.detach().cpu().numpy()
+            else:
+                arr = np.asarray(value)
+            arr = np.nan_to_num(arr, nan=0.0, posinf=0.0, neginf=0.0)
+            path = os.path.join(artifact_dir, f"{name}_{raw_name}.npy")
+            np.save(path, arr)
+            saved_paths.append(path)
+
+        if clean_image is not None and attacked_image is not None and mask is not None:
+            path = os.path.join(artifact_dir, f"{name}_mask_overlay_pair.png")
+            save_mask_overlay_pair(clean_image, attacked_image, mask, path)
+            saved_paths.append(path)
+            save_raw("clean_image", clean_image)
+            save_raw("attacked_image", attacked_image)
+            save_raw("patch_mask", mask)
+
+        if clean_flow is not None and attacked_flow is not None:
+            path = os.path.join(artifact_dir, f"{name}_flow_pair_common_scale.png")
+            save_flow_pair_common_scale(clean_flow, attacked_flow, path)
+            saved_paths.append(path)
+            save_raw("clean_flow", clean_flow)
+            save_raw("attacked_flow", attacked_flow)
+
+        if clean_depth is not None and attacked_depth is not None:
+            path = os.path.join(artifact_dir, f"{name}_depth_pair_common_scale.png")
+            save_depth_pair_common_scale(clean_depth, attacked_depth, path)
+            saved_paths.append(path)
+            save_raw("clean_depth", clean_depth)
+            save_raw("attacked_depth", attacked_depth)
+
+        for path in saved_paths:
+            mlflow.log_artifact(path, artifact_path="diploma_artifacts")
+        return saved_paths
+
     def finalize(self):
         """
         Final step: Compute and log final mean metrics at the end of the run.
@@ -861,13 +1017,13 @@ class AttackMetricsTracker:
                 f"lower = stronger attack): {mean_metrics['multitask_robustness_score']:.4f}"
             )
 
+        self.plot_attack_histogram()
+
         try:
             mlflow.end_run()
             print("MLflow run ended.")
         except Exception as e:
             print("mlflow.end_run() failed:", e)
-            
-        self.plot_attack_histogram()
             
     def save_flow(self, flow):
         flow = flow.permute(1, 2, 0)  # change from CHW to HWC shape
