@@ -381,4 +381,47 @@ def parse_args():
     parser.add_argument("--plane_aug", action='store_true',
                         help='Attack SS model at the same time')
 
+    # --- EOT Augmentation ---
+    parser.add_argument(
+        "--eot_n",
+        type=int,
+        default=1,
+        help="Number of EOT augmentation samples per gradient step. "
+             "1 = standard single-sample (current behaviour). "
+             "Higher values improve physical robustness at the cost of N× more forward passes per step.",
+    )
+    parser.add_argument(
+        "--eot_angle",
+        type=float,
+        default=30.0,
+        help="Max rotation angle (degrees) for EOT patch augmentation. "
+             "Patch is rotated by a uniform sample from [-eot_angle, +eot_angle] each EOT sample.",
+    )
+    parser.add_argument(
+        "--eot_scale_min",
+        type=float,
+        default=0.8,
+        help="Minimum scale factor for EOT patch augmentation.",
+    )
+    parser.add_argument(
+        "--eot_scale_max",
+        type=float,
+        default=1.2,
+        help="Maximum scale factor for EOT patch augmentation.",
+    )
+    parser.add_argument(
+        "--eot_color_jitter",
+        type=float,
+        default=0.0,
+        help="Half-range for brightness / contrast / saturation multipliers in EOT photometric augmentation. "
+             "0 = disabled.  Example: 0.2 → multipliers drawn from [0.8, 1.2].",
+    )
+    parser.add_argument(
+        "--eot_noise_std",
+        type=float,
+        default=0.0,
+        help="Std of additive Gaussian noise applied during EOT photometric augmentation. "
+             "0 = disabled.",
+    )
+
     return parser.parse_args()

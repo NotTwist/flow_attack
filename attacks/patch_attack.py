@@ -15,6 +15,7 @@ from .DetectionDefenses.helper_functions.losses import aee_masked, acs_masked, m
 from .DetectionDefenses.helper_functions.ownutilities import preprocess_img as oa_preprocess_img, postprocess_flow as oa_postprocess_flow
 from .DetectionDefenses.helper_functions.custom_optimizer import IFGSM, ClippedPGD
 from .DetectionDefenses.helper_functions.patch_adversary import PatchAdversary
+from .eot_transforms import apply_photometric_eot
 import sys
 import pathlib
 from datasets_utils.dataset_utils import prepare_dataloader
@@ -235,15 +236,23 @@ def train_patch_ptlflow(
                 print(f"Warning: failed to log patch checkpoint to MLflow: {e}")
         return path
 
+    # EOT parameters
+    eot_n = max(1, getattr(args, 'eot_n', 1))
+    eot_angle = getattr(args, 'eot_angle', 30.0)
+    eot_scale_min = getattr(args, 'eot_scale_min', 0.8)
+    eot_scale_max = getattr(args, 'eot_scale_max', 1.2)
+    eot_color_jitter = getattr(args, 'eot_color_jitter', 0.0)
+    eot_noise_std = getattr(args, 'eot_noise_std', 0.0)
+
     # adversary
     A = PatchAdversary(
         None,
         size=args.patch_size,
-        angle=[-10, 10],
-        scale=[0.95, 1.05],
+        angle=[-eot_angle, eot_angle],
+        scale=[eot_scale_min, eot_scale_max],
         change_of_variable=args.change_of_variables,
         random_location=args.random_loc,
-        image_size=(375, 1242), 
+        image_size=(375, 1242),
         ellipse_scale_y=args.y_scale,
         patch_generator=patch_generator,
     ).to(device)
@@ -563,195 +572,208 @@ def train_patch_ptlflow(
                 else:
                     optimizer.zero_grad()
 
-                # --- патч-проекция / текстурирование по плоскости дороги ---
-                if args.patch_projection:
-                    (
-                        I1_p_batch,
-                        I2_p_batch,
-                        M_batch,
-                        ys_batch,
-                        xs_batch,
-                        road_mask,
-                        planes
-                    ) = project_patch_on_scene(
-                        I1_batch, I2_batch, K,
-                        A=A,
-                        mde_model=mde_model,
-                        ss_model=ss_model,
-                        io_adapter=io_adapter,
-                        device=device,
-                        plane_aug=args.plane_aug,
-                        precomputed_depth=cached_depth,
-                        precomputed_road_mask=cached_road_mask,
-                        precomputed_planes=cached_planes,
-                        flow_shift=args.flow_shift,
-                    )
-                else:
-                    I1_p_batch, I2_p_batch, M_batch, ys_batch, xs_batch = A(
-                        I1_batch, I2_batch, flow_shift=args.flow_shift)
-                    road_mask, planes = None, None
+                # --- Resolve per-task weights for this step ---
+                if weight_strategy == "minmax":
+                    _wi = {t: W[i] for i, t in enumerate(active_tasks)}
+                    flow_w = _wi.get("flow", torch.tensor(0.0, device=device))
+                    mde_w  = _wi.get("mde",  torch.tensor(0.0, device=device))
+                    ss_w   = _wi.get("ss",   torch.tensor(0.0, device=device))
+                # (for 'fixed' and 'normalized', flow_w/mde_w/ss_w are already set)
 
-                # --- defense ---
+                # --- Pre-compute defense-filtered unattacked predictions (once per step) ---
+                # The unattacked branch depends only on the clean images, not on which
+                # EOT augmentation sample we are on, so we compute it a single time here.
                 if D is not None:
-                    I1_att_def_batch, I2_att_def_batch = D(
-                        I1_p_batch, I2_p_batch, M_batch)
-                    I1_unatt_def_batch, I2_unatt_def_batch = D(
-                        I1_batch, I2_batch, torch.zeros_like(M_batch))
-                    # When a defense is active the "unattacked" images are
-                    # defense-filtered, so re-compute inputs/predictions for
-                    # that branch (cannot reuse the clean-image cache).
-                    unattacked_images_tensor = torch.stack(
-                        [I1_unatt_def_batch, I2_unatt_def_batch], dim=1)
+                    _zero_mask = torch.zeros(
+                        (B, 1, *I1_batch.shape[-2:]), device=device)
+                    I1_unatt_def, I2_unatt_def = D(I1_batch, I2_batch, _zero_mask)
+                    unatt_def_tensor = torch.stack(
+                        [I1_unatt_def, I2_unatt_def], dim=1)
                     unattacked_inputs = prepare_inputs_safe(
-                        unattacked_images_tensor, flows_tensor=flow_gt, valids_tensor=valid)
+                        unatt_def_tensor, flows_tensor=flow_gt, valids_tensor=valid)
                     with torch.no_grad():
                         pred_unattacked = model(unattacked_inputs)['flows'].squeeze(0)
                         if mde_model is not None and args.attack_mde:
                             mde_pred_unatt = mde_model(unattacked_inputs)
                         if ss_model is not None and args.attack_ss:
-                            ss_pred_unatt = ss_model(unattacked_inputs, return_logits=True)
+                            ss_pred_unatt = ss_model(
+                                unattacked_inputs, return_logits=True)
                             ss_prob_unatt = torch.softmax(ss_pred_unatt, dim=1)
                 else:
-                    I1_att_def_batch, I2_att_def_batch = I1_p_batch, I2_p_batch
-                    # Reuse the pre-computed cache (no defense applied)
                     unattacked_inputs = unattacked_inputs_cache
 
-                attacked_images_tensor = torch.stack(
-                    [I1_att_def_batch, I2_att_def_batch], dim=1)
+                # --- EOT loop ---
+                # Each iteration re-places the patch with fresh random geometric
+                # transforms (rotation, scale, location) and applies a fresh
+                # photometric augmentation.  Adversarial losses are accumulated
+                # and averaged.  Consistency / TV / NPS are computed only on the
+                # last iteration (graph still alive) and added at full weight.
+                flow_adv_loss = torch.tensor(0.0, device=device)
+                mde_adv_loss  = torch.tensor(0.0, device=device)
+                ss_adv_loss   = torch.tensor(0.0, device=device)
 
-                attacked_inputs = prepare_inputs_safe(
-                    attacked_images_tensor, flows_tensor=flow_gt, valids_tensor=valid)
+                for eot_i in range(eot_n):
+                    is_last_eot = (eot_i == eot_n - 1)
 
-                # --- forward through flow model (attacked only; unattacked is cached) ---
-                pred_attacked = model(attacked_inputs)['flows'].squeeze(0)
-
-                # if TF_flow is not None:
-                #     pred_attacked = TF_flow(pred_attacked, current_image=I1_att_def_batch)
-
-                if M_batch is not None and M_batch.dim() == 4 and M_batch.shape[1] == 1:
-                    M_flow_patch = torch.nn.functional.interpolate(
-                        M_batch, size=(H_flow, W_flow), mode='nearest'
-                    )
-                else:
-                    M_flow_patch = torch.ones(
-                        (B_flow, 1, H_flow, W_flow), device=device, dtype=torch.float32
-                    )
-
-                M_attack_flow = M_flow_patch.float()
-                M_outside_flow = 1.0 - M_attack_flow
-
-                # --- target для flow ---
-                if args.target == 'scene':
-                    target = flow_target_fn(
-                        pred_unattacked, xs_batch, ys_batch + args.patch_size // 2
-                    )
-                else:
-                    target = flow_target_fn(pred_unattacked)
-                target = target.to(device)
-
-                # --- adversarial flow loss (только в области атаки) ---
-                flow_adv_loss = flow_loss_fn(
-                    pred_attacked, target, M_attack_flow
-                )
-
-                # --- outside-consistency для flow ---
-                flow_cons_loss = masked_mse_consistency(
-                    pred_attacked, pred_unattacked, M_outside_flow
-                )
-
-                # --- MDE branch ---
-                if mde_model is not None and args.attack_mde:
-                    mde_pred_att = mde_model(attacked_inputs)
-                    # mde_pred_unatt is pre-computed above (cached or defense-adjusted)
-
-                    if args.mde_target == 'scene':
-                        mde_target_batch = mde_target_fn(
-                            mde_pred_unatt, xs_batch, ys_batch + args.patch_size // 2
+                    # --- patch placement (resamples transforms each call) ---
+                    if args.patch_projection:
+                        (
+                            I1_p_batch, I2_p_batch, M_batch,
+                            ys_batch, xs_batch, road_mask, planes,
+                        ) = project_patch_on_scene(
+                            I1_batch, I2_batch, K,
+                            A=A,
+                            mde_model=mde_model,
+                            ss_model=ss_model,
+                            io_adapter=io_adapter,
+                            device=device,
+                            plane_aug=args.plane_aug,
+                            precomputed_depth=cached_depth,
+                            precomputed_road_mask=cached_road_mask,
+                            precomputed_planes=cached_planes,
+                            flow_shift=args.flow_shift,
                         )
                     else:
-                        mde_target_batch = mde_target_fn(mde_pred_unatt)
+                        I1_p_batch, I2_p_batch, M_batch, ys_batch, xs_batch = A(
+                            I1_batch, I2_batch, flow_shift=args.flow_shift)
+                        road_mask, planes = None, None
 
-                    mde_target_batch = mde_target_batch.to(device)
+                    # --- photometric EOT augmentation ---
+                    if eot_color_jitter > 0 or eot_noise_std > 0:
+                        I1_p_batch = apply_photometric_eot(
+                            I1_p_batch, eot_color_jitter, eot_noise_std)
+                        I2_p_batch = apply_photometric_eot(
+                            I2_p_batch, eot_color_jitter, eot_noise_std)
 
-                    # маски в разрешении depth
-                    M_attack_mde = torch.nn.functional.interpolate(
-                        M_attack_flow, size=mde_pred_att.shape[-2:], mode='nearest'
-                    )
-                    M_outside_mde = 1.0 - M_attack_mde
+                    # --- defense on attacked images ---
+                    if D is not None:
+                        I1_att_def_batch, I2_att_def_batch = D(
+                            I1_p_batch, I2_p_batch, M_batch)
+                    else:
+                        I1_att_def_batch, I2_att_def_batch = I1_p_batch, I2_p_batch
 
-                    mde_adv_loss = mde_loss_fn(
-                        mde_pred_att, mde_target_batch, M_attack_mde
-                    )
+                    attacked_images_tensor = torch.stack(
+                        [I1_att_def_batch, I2_att_def_batch], dim=1)
+                    attacked_inputs = prepare_inputs_safe(
+                        attacked_images_tensor, flows_tensor=flow_gt, valids_tensor=valid)
 
-                    mde_cons_loss = masked_mse_consistency(
-                        mde_pred_att, mde_pred_unatt, M_outside_mde
-                    )
-                else:
-                    mde_adv_loss = torch.tensor(0.0, device=device)
-                    mde_cons_loss = torch.tensor(0.0, device=device)
+                    # --- forward through flow model ---
+                    pred_attacked = model(attacked_inputs)['flows'].squeeze(0)
 
-                # --- semantic segmentation branch ---
-                if ss_model is not None and args.attack_ss:
-                    ss_pred_att = ss_model(attacked_inputs, return_logits=True)
-                    # ss_pred_unatt and ss_prob_unatt are pre-computed above
+                    if M_batch is not None and M_batch.dim() == 4 and M_batch.shape[1] == 1:
+                        M_flow_patch = torch.nn.functional.interpolate(
+                            M_batch, size=(H_flow, W_flow), mode='nearest')
+                    else:
+                        M_flow_patch = torch.ones(
+                            (B_flow, 1, H_flow, W_flow), device=device, dtype=torch.float32)
+                    M_attack_flow = M_flow_patch.float()
 
-                    # if TF_ss is not None:
-                        # ss_pred_att = TF_ss(ss_pred_att, current_image=I1_att_def_batch)
+                    # --- adversarial flow loss ---
+                    if args.target == 'scene':
+                        target = flow_target_fn(
+                            pred_unattacked, xs_batch, ys_batch + args.patch_size // 2)
+                    else:
+                        target = flow_target_fn(pred_unattacked)
+                    target = target.to(device)
 
-                    ss_target_batch = ss_target_fn(ss_pred_unatt).to(device)
+                    eot_flow_adv = flow_loss_fn(pred_attacked, target, M_attack_flow)
+                    flow_adv_loss = flow_adv_loss + eot_flow_adv.detach()
 
-                    M_attack_ss = torch.nn.functional.interpolate(
-                        M_attack_flow, size=ss_pred_att.shape[-2:], mode='nearest'
-                    )
-                    M_outside_ss = 1.0 - M_attack_ss
+                    # --- MDE adversarial loss ---
+                    mde_pred_att = None
+                    M_attack_mde = None
+                    if mde_model is not None and args.attack_mde:
+                        mde_pred_att = mde_model(attacked_inputs)
+                        if args.mde_target == 'scene':
+                            mde_target_batch = mde_target_fn(
+                                mde_pred_unatt, xs_batch, ys_batch + args.patch_size // 2)
+                        else:
+                            mde_target_batch = mde_target_fn(mde_pred_unatt)
+                        mde_target_batch = mde_target_batch.to(device)
+                        M_attack_mde = torch.nn.functional.interpolate(
+                            M_attack_flow, size=mde_pred_att.shape[-2:], mode='nearest')
+                        eot_mde_adv = mde_loss_fn(mde_pred_att, mde_target_batch, M_attack_mde)
+                        mde_adv_loss = mde_adv_loss + eot_mde_adv.detach()
+                    else:
+                        eot_mde_adv = torch.tensor(0.0, device=device)
 
-                    # adversarial seg loss (ломаем внутри)
-                    ss_adv_loss = ss_loss_fn(
-                        ss_pred_att, ss_target_batch, M_attack_ss
-                    )
+                    # --- SS adversarial loss ---
+                    ss_pred_att = None
+                    M_attack_ss = None
+                    if ss_model is not None and args.attack_ss:
+                        ss_pred_att = ss_model(attacked_inputs, return_logits=True)
+                        ss_target_batch = ss_target_fn(ss_pred_unatt).to(device)
+                        M_attack_ss = torch.nn.functional.interpolate(
+                            M_attack_flow, size=ss_pred_att.shape[-2:], mode='nearest')
+                        eot_ss_adv = ss_loss_fn(ss_pred_att, ss_target_batch, M_attack_ss)
+                        ss_adv_loss = ss_adv_loss + eot_ss_adv.detach()
+                    else:
+                        eot_ss_adv = torch.tensor(0.0, device=device)
 
-                    # outside-consistency по вероятностям
-                    ss_prob_att = torch.softmax(ss_pred_att, dim=1)
-                    ss_cons_loss = masked_mse_consistency(
-                        ss_prob_att, ss_prob_unatt, M_outside_ss
-                    )
-                else:
-                    ss_adv_loss = torch.tensor(0.0, device=device)
-                    ss_cons_loss = torch.tensor(0.0, device=device)
+                    # --- Build the backward pass for this EOT sample ---
+                    # Adversarial losses are scaled by 1/eot_n so the accumulated
+                    # gradient across all N samples equals the mean gradient.
+                    # On the last sample we also add consistency, TV, and NPS at
+                    # full weight — they are computed here while the computation
+                    # graph for pred_attacked is still alive.
+                    eot_adv = (
+                        flow_w * eot_flow_adv +
+                        mde_w  * eot_mde_adv  +
+                        ss_w   * eot_ss_adv
+                    ) / eot_n
 
-                # --- TV loss (skip when weight is 0) ---
-                current_patch = A.get_P(Mask=False)
+                    if is_last_eot:
+                        M_outside_flow = 1.0 - M_attack_flow
+                        flow_cons_loss = masked_mse_consistency(
+                            pred_attacked, pred_unattacked, M_outside_flow)
 
-                tv_loss = total_variation_loss(current_patch, tv_w) if tv_w > 0.0 \
-                    else torch.tensor(0.0, device=device)
+                        if mde_pred_att is not None and M_attack_mde is not None:
+                            mde_cons_loss = masked_mse_consistency(
+                                mde_pred_att, mde_pred_unatt, 1.0 - M_attack_mde)
+                        else:
+                            mde_cons_loss = torch.tensor(0.0, device=device)
 
-                # --- Printability (NPS) loss (skip when weight is 0) ---
-                nps_loss = printability_loss(current_patch, nps_w) if nps_w > 0.0 \
-                    else torch.tensor(0.0, device=device)
+                        if ss_pred_att is not None and M_attack_ss is not None:
+                            ss_prob_att = torch.softmax(ss_pred_att, dim=1)
+                            ss_cons_loss = masked_mse_consistency(
+                                ss_prob_att, ss_prob_unatt, 1.0 - M_attack_ss)
+                        else:
+                            ss_cons_loss = torch.tensor(0.0, device=device)
 
-                # --- Resolve per-task weights for this step ------
-                if weight_strategy == "minmax":
-                    # Map simplex vector W back to per-task scalars.
-                    # W is ordered according to active_tasks.
-                    _wi = {t: W[i] for i, t in enumerate(active_tasks)}
-                    flow_w = _wi.get("flow", torch.tensor(0.0, device=device))
-                    mde_w = _wi.get("mde", torch.tensor(0.0, device=device))
-                    ss_w = _wi.get("ss", torch.tensor(0.0, device=device))
-                # (for 'fixed' and 'normalized', flow_w/mde_w/ss_w are already set)
+                        current_patch = A.get_P(Mask=False)
+                        tv_loss = total_variation_loss(current_patch, tv_w) \
+                            if tv_w > 0.0 else torch.tensor(0.0, device=device)
+                        nps_loss = printability_loss(current_patch, nps_w) \
+                            if nps_w > 0.0 else torch.tensor(0.0, device=device)
 
-                # --- TOTAL LOSS ---
+                        step_loss = eot_adv + (
+                            flow_cons_w * flow_cons_loss +
+                            mde_cons_w  * mde_cons_loss  +
+                            ss_cons_w   * ss_cons_loss   +
+                            tv_loss +
+                            nps_loss
+                        )
+                        step_loss.backward()
+                    else:
+                        eot_adv.backward()
+
+                # Average the accumulated adv-loss scalars (used only for logging)
+                flow_adv_loss = flow_adv_loss / eot_n
+                mde_adv_loss  = mde_adv_loss  / eot_n
+                ss_adv_loss   = ss_adv_loss   / eot_n
+
+                # Approximate total loss for logging
                 total_loss = (
                     flow_w * flow_adv_loss +
-                    mde_w * mde_adv_loss +
-                    ss_w * ss_adv_loss +
-                    flow_cons_w * flow_cons_loss +
-                    mde_cons_w * mde_cons_loss +
-                    ss_cons_w * ss_cons_loss +
-                    tv_loss +
-                    nps_loss
+                    mde_w  * mde_adv_loss  +
+                    ss_w   * ss_adv_loss   +
+                    flow_cons_w * flow_cons_loss.detach() +
+                    mde_cons_w  * mde_cons_loss.detach()  +
+                    ss_cons_w   * ss_cons_loss.detach()   +
+                    tv_loss.detach() +
+                    nps_loss.detach()
                 )
 
-                total_loss.backward()
                 if use_diffusion_patch:
                     diffusion_step_stats = A.step_runtime_patch(
                         optimizer_name=args.diffusion_optimizer,
@@ -761,20 +783,9 @@ def train_patch_ptlflow(
                 else:
                     optimizer.step()
 
-                # --- Inner minimisation: update w  (Alg.1 step 4, Eq.4) ---
-                # Guo et al. ICASSP 2025, Eq.2:
-                #   max_δ  min_{w∈P}  Σ w_i L_i(x+δ) + γ/2 ||w − 1/k||²
-                #
-                # In the paper L_i is *maximised* (PGD ascent), so the inner
-                # min over w uses gradient descent:
-                #   ∇_w f = L_vec + γ(w − 1/k)
-                #   w_new = proj_P(w − α₂ · ∇_w f)            ... Eq.4
-                #
-                # In our patch attack we *minimise* L_i (lower = better attack),
-                # so the task with the HIGHEST loss is the hardest to attack.
-                # The equivalent formulation is:
-                #   min_patch  max_{w∈P}  Σ w_i L_i − γ/2 ||w − 1/k||²
-                # which gives gradient ASCENT on w:
+                # --- Min-max weight update (Guo et al. ICASSP 2025, Alg.1 Eq.4) ---
+                # We minimise L_i (lower = better attack), so the task with the
+                # highest loss is the hardest to attack → gradient ASCENT on w:
                 #   ∇_w g = L_vec − γ(w − 1/k)
                 #   w_new = proj_P(w + α₂ · ∇_w g)
                 if weight_strategy == "minmax":
