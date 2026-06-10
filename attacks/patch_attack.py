@@ -1,6 +1,6 @@
 from metrics.attack_metrics import AttackMetricsTracker
 from utils.targets import get_target, get_mde_target, get_ss_target
-from utils.losses import down_hinge_loss, get_mde_loss, get_ss_loss, get_loss
+from utils.losses import directional_hinge_loss, get_mde_loss, get_ss_loss, get_loss
 from os import path as op
 import os
 import json
@@ -205,12 +205,17 @@ def train_patch_ptlflow(
                 if step is not None:
                     label += f"_step_{step:06d}"
         path = op.join(patch_checkpoint_dir, f"patch_{label}.png")
-        adversary.save_png(path)
-        adversary.save_png(op.join(patch_checkpoint_dir, "latest.png"))
+        latest_path = op.join(patch_checkpoint_dir, "latest.png")
+        try:
+            adversary.save_png(path)
+            adversary.save_png(latest_path)
+        except OSError as e:
+            print(f"Warning: failed to save patch checkpoint {path}: {e}")
+            return None
         metadata = {
             "format": "flow_attack_patch_checkpoint_v1",
             "patch_path": path,
-            "latest_patch_path": op.join(patch_checkpoint_dir, "latest.png"),
+            "latest_patch_path": latest_path,
             "epoch": epoch_idx + 1,
             "batch": None if batch_idx is None else batch_idx + 1,
             "step": step,
@@ -222,16 +227,21 @@ def train_patch_ptlflow(
             },
         }
         metadata_path = op.splitext(path)[0] + ".json"
-        with open(metadata_path, "w", encoding="utf-8") as f:
-            json.dump(metadata, f, indent=2, sort_keys=True)
-        with open(op.join(patch_checkpoint_dir, "latest.json"), "w", encoding="utf-8") as f:
-            json.dump({**metadata, "patch_path": op.join(patch_checkpoint_dir, "latest.png")}, f, indent=2, sort_keys=True)
+        latest_metadata_path = op.join(patch_checkpoint_dir, "latest.json")
+        try:
+            with open(metadata_path, "w", encoding="utf-8") as f:
+                json.dump(metadata, f, indent=2, sort_keys=True)
+            with open(latest_metadata_path, "w", encoding="utf-8") as f:
+                json.dump({**metadata, "patch_path": latest_path}, f, indent=2, sort_keys=True)
+        except OSError as e:
+            print(f"Warning: failed to save patch checkpoint metadata {metadata_path}: {e}")
+            return path
         if metrics_tracker is not None:
             try:
                 mlflow.log_artifact(path, artifact_path="patch_checkpoints")
                 mlflow.log_artifact(metadata_path, artifact_path="patch_checkpoints")
-                mlflow.log_artifact(op.join(patch_checkpoint_dir, "latest.png"), artifact_path="patch_checkpoints_latest")
-                mlflow.log_artifact(op.join(patch_checkpoint_dir, "latest.json"), artifact_path="patch_checkpoints_latest")
+                mlflow.log_artifact(latest_path, artifact_path="patch_checkpoints_latest")
+                mlflow.log_artifact(latest_metadata_path, artifact_path="patch_checkpoints_latest")
             except Exception as e:
                 print(f"Warning: failed to log patch checkpoint to MLflow: {e}")
         return path
@@ -307,20 +317,24 @@ def train_patch_ptlflow(
     #     TF_mde = TemporalPredictionFilter(mode=mode, window_size=args.temp_window, sigma_color=args.sigma_color).to(device)
     #     TF_ss = TemporalPredictionFilter(mode=mode, window_size=args.temp_window, sigma_color=args.sigma_color).to(device)
     # targets & losses for optical flow
-    flow_target_fn = get_target(args.target, magnitude=args.flow_target_magnitude)
-    if args.target == 'down' and getattr(args, "down_loss", "hinge") == "hinge":
+    flow_target_fn = get_target(
+        args.target,
+        magnitude=args.flow_target_magnitude,
+        angle_deg=getattr(args, "flow_target_angle_deg", 90.0),
+    )
+    if args.target in ('down', 'direction') and getattr(args, "down_loss", "hinge") == "hinge":
         def flow_loss_fn(pred, target, mask_override=None, **kwargs):
-            return down_hinge_loss(
+            return directional_hinge_loss(
                 pred,
                 target,
                 mask=mask_override,
                 min_mag_ratio=getattr(args, "down_hinge_min_mag_ratio", 0.8),
-                horizontal_weight=getattr(args, "down_hinge_horizontal_weight", 0.1),
+                orthogonal_weight=getattr(args, "down_hinge_horizontal_weight", 0.1),
                 magnitude_weight=getattr(args, "down_hinge_magnitude_weight", 0.5),
-                vertical_weight=getattr(args, "down_hinge_vertical_weight", 1.0),
+                direction_weight=getattr(args, "down_hinge_vertical_weight", 1.0),
             )
 
-        flow_loss_fn.specs = [("down_hinge", 1.0)]
+        flow_loss_fn.specs = [("directional_hinge", 1.0)]
         flow_loss_fn.untargeted = False
     else:
         flow_loss_fn = get_loss(args.loss, untargeted=args.target == 'untargeted')
@@ -530,20 +544,27 @@ def train_patch_ptlflow(
                 # Compute each task's clean-image loss and use 1/L_clean
                 # as a normaliser so that all tasks contribute equally at
                 # the start, then scaled by the user-provided ratios.
+                # Untargeted tasks are skipped: target == clean prediction,
+                # so L_clean == 0 by definition and normalization is meaningless.
                 with torch.no_grad():
                     _M_ones = torch.ones(
                         (B_flow, 1, H_flow, W_flow), device=device)
 
-                    _flow_target = flow_target_fn(pred_unattacked) \
-                        if args.target != 'scene' \
-                        else flow_target_fn(pred_unattacked, 0, 0)
-                    _flow_target = _flow_target.to(device)
-                    L_flow_clean = flow_loss_fn(
-                        pred_unattacked, _flow_target, _M_ones
-                    ).clamp(min=1e-8)
+                    if args.target == 'untargeted':
+                        flow_w = flow_w_init
+                    else:
+                        _flow_target = flow_target_fn(pred_unattacked) \
+                            if args.target != 'scene' \
+                            else flow_target_fn(pred_unattacked, 0, 0)
+                        _flow_target = _flow_target.to(device)
+                        L_flow_clean = flow_loss_fn(
+                            pred_unattacked, _flow_target, _M_ones
+                        ).abs().clamp(min=1e-8)
+                        flow_w = flow_w_init / L_flow_clean.item()
 
-                    L_mde_clean = torch.tensor(1.0, device=device)
-                    if mde_model is not None and args.attack_mde and mde_pred_unatt is not None:
+                    mde_w = mde_w_init
+                    if mde_model is not None and args.attack_mde and mde_pred_unatt is not None \
+                            and args.mde_target != 'untargeted':
                         _mde_target = mde_target_fn(mde_pred_unatt) \
                             if args.mde_target != 'scene' \
                             else mde_target_fn(mde_pred_unatt)
@@ -551,21 +572,20 @@ def train_patch_ptlflow(
                         _M_mde = torch.ones_like(mde_pred_unatt[:, :1, :, :])
                         L_mde_clean = mde_loss_fn(
                             mde_pred_unatt, _mde_target, _M_mde
-                        ).clamp(min=1e-8)
+                        ).abs().clamp(min=1e-8)
+                        mde_w = mde_w_init / L_mde_clean.item()
 
-                    L_ss_clean = torch.tensor(1.0, device=device)
-                    if ss_model is not None and args.attack_ss and ss_pred_unatt is not None:
+                    ss_w = ss_w_init
+                    if ss_model is not None and args.attack_ss and ss_pred_unatt is not None \
+                            and args.ss_target != 'untargeted':
                         _ss_target = ss_target_fn(ss_pred_unatt).to(device)
                         _M_ss = torch.ones(
                             ss_pred_unatt.shape[0], 1,
                             *ss_pred_unatt.shape[-2:], device=device)
                         L_ss_clean = ss_loss_fn(
                             ss_pred_unatt, _ss_target, _M_ss
-                        ).clamp(min=1e-8)
-
-                flow_w = flow_w_init / L_flow_clean.item()
-                mde_w = mde_w_init / L_mde_clean.item()
-                ss_w = ss_w_init / L_ss_clean.item()
+                        ).abs().clamp(min=1e-8)
+                        ss_w = ss_w_init / L_ss_clean.item()
 
             # (minmax: W persists across batches — no reset here)
 
@@ -636,10 +656,21 @@ def train_patch_ptlflow(
                             precomputed_road_mask=cached_road_mask,
                             precomputed_planes=cached_planes,
                             flow_shift=args.flow_shift,
+                            clean_flow=pred_unattacked,
+                            flow_shift_mode=getattr(args, "flow_shift_mode", "fixed"),
+                            flow_shift_scale=getattr(args, "flow_shift_scale", 1.0),
+                            flow_shift_max=getattr(args, "flow_shift_max", 80.0),
                         )
                     else:
                         I1_p_batch, I2_p_batch, M_batch, ys_batch, xs_batch = A(
-                            I1_batch, I2_batch, flow_shift=args.flow_shift)
+                            I1_batch,
+                            I2_batch,
+                            flow_shift=args.flow_shift,
+                            clean_flow=pred_unattacked,
+                            flow_shift_mode=getattr(args, "flow_shift_mode", "fixed"),
+                            flow_shift_scale=getattr(args, "flow_shift_scale", 1.0),
+                            flow_shift_max=getattr(args, "flow_shift_max", 80.0),
+                        )
                         road_mask, planes = None, None
 
                     # --- photometric EOT augmentation ---
@@ -802,10 +833,11 @@ def train_patch_ptlflow(
                                 task_losses.append(mde_adv_loss.detach())
                             elif t == "ss":
                                 task_losses.append(ss_adv_loss.detach())
-                        L_vec = torch.stack(task_losses)
+                        L_vec = torch.stack(task_losses).abs()
                         # Normalise by per-task EMA so tasks on different
                         # absolute scales (depth metres vs. cross-entropy)
                         # contribute equally to the weight gradient.
+                        # Use abs() so untargeted (negated) losses don't corrupt the EMA.
                         loss_ema = ema_momentum * loss_ema + (1 - ema_momentum) * L_vec
                         L_vec_norm = L_vec / (loss_ema + 1e-8)
                         grad_w = L_vec_norm - gamma_w * (W - 1.0 / n_tasks)
@@ -917,8 +949,11 @@ def train_patch_ptlflow(
         # save patch
         epoch_patch_path = save_patch_checkpoint(A, epoch_idx=epoch)
         if metrics_tracker is not None:
-            A.save_png(op.join(
-                args.output_dir, f"patch_{metrics_tracker.run_name}_{epoch+1}.png"))
+            try:
+                A.save_png(op.join(
+                    args.output_dir, f"patch_{metrics_tracker.run_name}_{epoch+1}.png"))
+            except OSError as e:
+                print(f"Warning: failed to save epoch patch PNG: {e}")
         if metrics_tracker is not None and args.save_artifacts:
                 metrics_tracker.save_artifact(
                     A, f"{epoch+1}_patch", artifact_type="patch")

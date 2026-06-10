@@ -6,6 +6,7 @@ import torch.nn.functional as F
 import numpy as np
 import os
 import os.path
+import math
 
 
 def zero_flow(flow):
@@ -113,6 +114,27 @@ def down_flow(flow, magnitude=1.0):
     return torch.cat([u, v], dim=1)
 
 
+def direction_flow(flow, magnitude=1.0, angle_deg=90.0):
+    """Create constant flow vectors at a requested image-plane angle.
+
+    Angle convention follows image coordinates: 0 degrees points right
+    (+u), 90 degrees points down (+v), 180 degrees points left, and
+    270 degrees points up.
+    """
+    B, C, H, W = flow.shape
+    device = flow.device
+    dtype = flow.dtype
+
+    angle_rad = math.radians(float(angle_deg))
+    u_value = float(magnitude) * math.cos(angle_rad)
+    v_value = float(magnitude) * math.sin(angle_rad)
+
+    u = torch.full((B, 1, H, W), u_value, device=device, dtype=dtype)
+    v = torch.full((B, 1, H, W), v_value, device=device, dtype=dtype)
+
+    return torch.cat([u, v], dim=1)
+
+
 def relative_down_flow(flow, magnitude=1.0):
     """Shift the clean flow target downward by a fixed amount.
 
@@ -171,6 +193,24 @@ def far_raw_depth(depth, margin: float = 0.1):
     d_range = (d_max - d_min).clamp_min(1e-6)
     target = d_min - float(margin) * d_range
     return target.expand_as(depth)
+
+
+def near_global_raw_depth(depth, dataset_min: float, dataset_max: float, margin: float = 0.1):
+    """Global-depth variant of near_raw_depth().
+
+    The target value is fixed from dataset-level raw MDE min/max estimates
+    instead of being recomputed for every input image.
+    """
+    d_range = max(float(dataset_max) - float(dataset_min), 1e-6)
+    value = float(dataset_max) + float(margin) * d_range
+    return torch.full_like(depth, value)
+
+
+def far_global_raw_depth(depth, dataset_min: float, dataset_max: float, margin: float = 0.1):
+    """Global-depth variant of far_raw_depth()."""
+    d_range = max(float(dataset_max) - float(dataset_min), 1e-6)
+    value = float(dataset_min) - float(margin) * d_range
+    return torch.full_like(depth, value)
 
 
 def scene_depth(depth, x, y):
@@ -248,6 +288,34 @@ def get_mde_target(
         def target(depth):
             return far_raw_depth(depth, margin=near_margin)
 
+    elif target_name in ('near_global', 'far_global'):
+        if data_loader is None or flow_model is None or mde_model is None or device is None:
+            raise ValueError(
+                f"For target_name='{target_name}' you must provide data_loader, flow_model, mde_model and device"
+            )
+
+        dataset_min = None
+        dataset_max = None
+
+        def target(depth):
+            nonlocal dataset_min, dataset_max
+            if dataset_min is None or dataset_max is None:
+                print(f"Computing dataset depth min/max for {target_name} target...")
+                dataset_min, dataset_max = estimate_depth_minmax(
+                    data_loader=data_loader,
+                    flow_model=flow_model,
+                    mde_model=mde_model,
+                    device=device,
+                )
+                print(f"Dataset raw depth min={dataset_min:.4f}, max={dataset_max:.4f}")
+            if target_name == 'near_global':
+                return near_global_raw_depth(
+                    depth, dataset_min=dataset_min, dataset_max=dataset_max, margin=near_margin
+                )
+            return far_global_raw_depth(
+                depth, dataset_min=dataset_min, dataset_max=dataset_max, margin=near_margin
+            )
+
     elif target_name == 'scene':
         # здесь исходная сигнатура scene_depth(depth, x, y) —
         # если ты её используешь, оставь как было
@@ -323,7 +391,7 @@ def get_ss_target(target_name='untargeted'):
     return target
 
 
-def get_target(target_name, custom_target_path="", device=None, magnitude=1.0):
+def get_target(target_name, custom_target_path="", device=None, magnitude=1.0, angle_deg=90.0):
     """Getter method which yields a specified target flow used during PCFA 
 
     Args:
@@ -335,6 +403,7 @@ def get_target(target_name, custom_target_path="", device=None, magnitude=1.0):
                     if custom target is desired provide the path to a .npy perturbation file. Defaults to "".
             device (_type_, optional): _description_. Defaults to None.
             magnitude (float): magnitude for directional targets (e.g. 'down').
+            angle_deg (float): image-plane angle for target_name='direction'.
 
     Raises:
             ValueError: Undefined choice for target.
@@ -356,6 +425,8 @@ def get_target(target_name, custom_target_path="", device=None, magnitude=1.0):
         target = partial(down_flow, magnitude=magnitude)
     elif target_name == 'relative_down':
         target = partial(relative_down_flow, magnitude=magnitude)
+    elif target_name == 'direction':
+        target = partial(direction_flow, magnitude=magnitude, angle_deg=angle_deg)
     else:
         raise ValueError('The specified target type "' + target_name +
                          '" is not defined and cannot be used. Select one of "zero", "neg_flow" or "custom". Aborting.')
@@ -415,3 +486,34 @@ def estimate_depth_percentile(
     all_depths = torch.cat(depth_samples, dim=0)
     depth_p = torch.quantile(all_depths, q).item()
     return depth_p
+
+
+def estimate_depth_minmax(
+    data_loader,
+    flow_model,
+    mde_model,
+    device,
+) -> tuple[float, float]:
+    """Estimate global raw MDE min/max over a dataloader."""
+    first_batch = next(iter(data_loader))
+    images, flow, valid, _, _ = first_batch
+    input_size = images.shape[-2:]
+
+    io_adapter = ptlflow.utils.io_adapter.IOAdapter(
+        flow_model, input_size=input_size, cuda=torch.cuda.is_available()
+    )
+
+    global_min = float("inf")
+    global_max = float("-inf")
+
+    with torch.no_grad():
+        for images, flow, valid, _, _ in tqdm(data_loader, desc="Estimating depth min/max"):
+            wrapped_inputs = {'images': images, 'flows': flow, 'valids': valid}
+            inputs = io_adapter.prepare_inputs(inputs=wrapped_inputs)
+            depth = mde_model(inputs).detach()
+            global_min = min(global_min, float(depth.min().item()))
+            global_max = max(global_max, float(depth.max().item()))
+
+    if not math.isfinite(global_min) or not math.isfinite(global_max):
+        raise RuntimeError("Failed to estimate finite dataset depth min/max")
+    return global_min, global_max

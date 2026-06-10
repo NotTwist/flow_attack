@@ -23,7 +23,7 @@ def parse_args():
                         help="Adversarial attack method to use.")
 
     parser.add_argument('--target', type=str, default='zero', choices=[
-                        'zero', 'neg_flow', 'untargeted', 'camera', 'scene', 'down', 'relative_down'], help="Choose a target for an attack")
+                        'zero', 'neg_flow', 'untargeted', 'camera', 'scene', 'down', 'relative_down', 'direction'], help="Choose a target for an attack")
 
     # Dataset selection argument
     parser.add_argument('--dataset', type=str, default='Kitti15', choices=['Kitti15', 'Sintel', 'carla'],
@@ -96,9 +96,12 @@ def parse_args():
                         help="Neural network model to use for monocular depth estimation.")
 
     parser.add_argument('--mde_target', type=str, default='zero',
-                        choices=['zero', 'zero_raw', 'untargeted', 'infinite', 'scene', 'p90', 'near', 'far'], help="Choose a target for an mde attack")
+                        choices=[
+                            'zero', 'zero_raw', 'untargeted', 'infinite', 'scene',
+                            'p90', 'near', 'far', 'near_global', 'far_global'
+                        ], help="Choose a target for an mde attack")
     parser.add_argument('--mde_near_margin', type=float, default=0.1,
-                        help="Margin as fraction of per-image raw MDE range for near/far MDE targets.")
+                        help="Margin as fraction of raw MDE range for near/far MDE targets.")
 
     parser.add_argument(
         "--loss_weights",
@@ -232,8 +235,39 @@ def parse_args():
         help="Vertical pixel shift of patch between frame1 and frame2 "
              "(simulates ego-motion). Positive = patch moves down in frame2.")
     parser.add_argument(
+        "--flow_shift_mode",
+        type=str,
+        default="fixed",
+        choices=["fixed", "clean_flow"],
+        help=(
+            "How to move the patch between frame1 and frame2. "
+            "'fixed' uses --flow_shift as a vertical offset. "
+            "'clean_flow' shifts the patch by the mean clean optical flow "
+            "inside the patch mask."
+        ),
+    )
+    parser.add_argument(
+        "--flow_shift_scale",
+        type=float,
+        default=1.0,
+        help="Multiplier for --flow_shift_mode clean_flow displacement.")
+    parser.add_argument(
+        "--flow_shift_max",
+        type=float,
+        default=80.0,
+        help="Maximum absolute clean-flow shift in pixels; <=0 disables clipping.")
+    parser.add_argument(
         "--flow_target_magnitude", type=float, default=1.0,
-        help="Magnitude of the 'down' flow target vector (default 1.0).")
+        help="Magnitude of directional flow targets such as 'down' and 'direction' (default 1.0).")
+    parser.add_argument(
+        "--flow_target_angle_deg",
+        type=float,
+        default=90.0,
+        help=(
+            "Angle for --target direction in image coordinates: "
+            "0=right, 90=down, 180=left, 270=up."
+        ),
+    )
     parser.add_argument(
         "--down_hinge_min_mag_ratio",
         type=float,

@@ -265,20 +265,21 @@ def f_cosim(pred, target, mask=None):
     return 1 - torch.sum(pred * target) / torch.sqrt(torch.sum(pred*pred)) * torch.sqrt(torch.sum(target*target))
 
 
-def down_hinge_loss(
+def directional_hinge_loss(
     pred,
     target,
     mask=None,
     min_mag_ratio: float = 0.8,
-    horizontal_weight: float = 0.1,
+    orthogonal_weight: float = 0.1,
     magnitude_weight: float = 0.5,
-    vertical_weight: float = 1.0,
+    direction_weight: float = 1.0,
 ):
-    """Directional hinge loss for absolute downward flow targets.
+    """Directional hinge loss for absolute constant-vector flow targets.
 
-    This is meant for target='down'. It avoids the failure mode where a large
-    patch collapses the flow prediction to zero: vertical flow below the target
-    and magnitude below a target-ratio margin are explicitly penalized.
+    This avoids the failure mode where a large patch collapses the flow
+    prediction to zero: progress along the target direction and total flow
+    magnitude are explicitly encouraged, while the component orthogonal to the
+    target direction is suppressed.
     """
     pred_u = pred[:, 0:1]
     pred_v = pred[:, 1:2]
@@ -287,15 +288,18 @@ def down_hinge_loss(
 
     target_mag = safe_sqrt(target_u.pow(2) + target_v.pow(2)).detach()
     pred_mag = safe_sqrt(pred_u.pow(2) + pred_v.pow(2))
+    unit_u = target_u / target_mag.clamp_min(EPS)
+    unit_v = target_v / target_mag.clamp_min(EPS)
 
-    vertical = F.relu(target_v - pred_v).pow(2)
-    horizontal = (pred_u - target_u).abs()
+    along_target = pred_u * unit_u + pred_v * unit_v
+    orthogonal = (pred_u * (-unit_v) + pred_v * unit_u).abs()
+    direction = F.relu(target_mag - along_target).pow(2)
     min_mag = float(min_mag_ratio) * target_mag
     magnitude = F.relu(min_mag - pred_mag).pow(2)
 
     loss_map = (
-        float(vertical_weight) * vertical
-        + float(horizontal_weight) * horizontal
+        float(direction_weight) * direction
+        + float(orthogonal_weight) * orthogonal
         + float(magnitude_weight) * magnitude
     )
 
@@ -308,6 +312,27 @@ def down_hinge_loss(
         return (loss_map * m).sum() / m.sum().clamp_min(EPS)
 
     return loss_map.mean()
+
+
+def down_hinge_loss(
+    pred,
+    target,
+    mask=None,
+    min_mag_ratio: float = 0.8,
+    horizontal_weight: float = 0.1,
+    magnitude_weight: float = 0.5,
+    vertical_weight: float = 1.0,
+):
+    """Backward-compatible wrapper for the old target='down' hinge options."""
+    return directional_hinge_loss(
+        pred,
+        target,
+        mask=mask,
+        min_mag_ratio=min_mag_ratio,
+        orthogonal_weight=horizontal_weight,
+        magnitude_weight=magnitude_weight,
+        direction_weight=vertical_weight,
+    )
 
 
 def two_norm_avg_delta(delta1, delta2):
@@ -461,6 +486,7 @@ def get_loss(
         "focal": focal_epe,
         "huber": huber_epe,
         "charbonnier": charbonnier_epe,
+        "directional_hinge": directional_hinge_loss,
         "down_hinge": down_hinge_loss,
     }
 

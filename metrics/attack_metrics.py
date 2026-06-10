@@ -1016,6 +1016,16 @@ class AttackMetricsTracker:
                 f"Multi-task target ratio (mean AEE/RMSE/seg-error to target vs clean; "
                 f"lower = stronger attack): {mean_metrics['multitask_robustness_score']:.4f}"
             )
+        if "mde_rmse_target_attack" in mean_metrics:
+            print(
+                f"MDE RMSE (attacked vs target): {mean_metrics['mde_rmse_target_attack']:.4f}"
+            )
+        if "mde_rmse_clean_target" in mean_metrics:
+            print(
+                f"MDE RMSE (clean vs target): {mean_metrics['mde_rmse_clean_target']:.4f}"
+            )
+        if "iou_target_attack" in mean_metrics:
+            print(f"IoU (attacked vs target): {mean_metrics['iou_target_attack']:.4f}")
 
         self.plot_attack_histogram()
 

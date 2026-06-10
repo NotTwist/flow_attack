@@ -133,3 +133,6 @@
 05/11/2026 18:35:26 - WARNING: The installed version of bitsandbytes was compiled without GPU support. 8-bit optimizers and GPU quantization are unavailable.
 05/11/2026 18:36:42 - WARNING: The installed version of bitsandbytes was compiled without GPU support. 8-bit optimizers and GPU quantization are unavailable.
 05/11/2026 19:25:12 - WARNING: The installed version of bitsandbytes was compiled without GPU support. 8-bit optimizers and GPU quantization are unavailable.
+05/19/2026 13:22:56 - WARNING: The installed version of bitsandbytes was compiled without GPU support. 8-bit optimizers and GPU quantization are unavailable.
+05/19/2026 13:26:35 - WARNING: The installed version of bitsandbytes was compiled without GPU support. 8-bit optimizers and GPU quantization are unavailable.
+05/19/2026 15:30:16 - WARNING: The installed version of bitsandbytes was compiled without GPU support. 8-bit optimizers and GPU quantization are unavailable.

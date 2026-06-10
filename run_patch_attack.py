@@ -87,8 +87,8 @@ def main():
 
     args.attack_type = "patch"
     args.effective_flow_loss = (
-        "down_hinge"
-        if args.target == "down" and getattr(args, "down_loss", "hinge") == "hinge"
+        "directional_hinge"
+        if args.target in ("down", "direction") and getattr(args, "down_loss", "hinge") == "hinge"
         else ",".join(args.loss)
     )
     # Set device
@@ -114,7 +114,11 @@ def main():
 
     # Load MDE model (only when it will be attacked)
     mde_model = None
-    of_target_fn = get_target(args.target, magnitude=args.flow_target_magnitude)
+    of_target_fn = get_target(
+        args.target,
+        magnitude=args.flow_target_magnitude,
+        angle_deg=getattr(args, "flow_target_angle_deg", 90.0),
+    )
 
     if args.attack_mde:
         mde_model = load_mde_model(model_name=args.mde_model, device=device)
@@ -162,10 +166,20 @@ def main():
         # train patch on train dataloader
         trained_patch = train_patch_ptlflow(
             args, model, data_loader, device, io_adapter, train_tracker, mde_model, ss_model)
-        trained_patch.save_png('patch.png')
-        trained_patch = PatchAdversary('patch.png', size=args.patch_size,
-                                       angle=0, scale=1, change_of_variable=args.change_of_variables,
-                                       random_location=args.random_loc, image_size=image_size, ellipse_scale_y=args.y_scale).to(device)
+        # Build the evaluation patch in memory. This avoids an unnecessary
+        # root-level patch.png write, which is fragile during large sweeps on
+        # nearly-full disks.
+        patch_tensor = trained_patch.get_P(Mask=True).detach().cpu()
+        trained_patch = PatchAdversary(
+            patch_tensor,
+            size=args.patch_size,
+            angle=0,
+            scale=1,
+            change_of_variable=False,
+            random_location=args.random_loc,
+            image_size=image_size,
+            ellipse_scale_y=args.y_scale,
+        ).to(device)
         train_tracker.finalize()
     else:
         print(f"Using trained patch from {args.trained_patch}...")
@@ -262,11 +276,20 @@ def main():
                 precomputed_road_mask=proj_road_mask,
                 precomputed_planes=proj_planes,
                 flow_shift=args.flow_shift,
+                clean_flow=original_flow,
+                flow_shift_mode=getattr(args, "flow_shift_mode", "fixed"),
+                flow_shift_scale=getattr(args, "flow_shift_scale", 1.0),
+                flow_shift_max=getattr(args, "flow_shift_max", 80.0),
             )
         else:
             attacked_image1, attacked_image2, mask, y, x = trained_patch(
                 images[:, 0, :, :, :], images[:, 1, :, :, :],
-                flow_shift=args.flow_shift)
+                flow_shift=args.flow_shift,
+                clean_flow=original_flow,
+                flow_shift_mode=getattr(args, "flow_shift_mode", "fixed"),
+                flow_shift_scale=getattr(args, "flow_shift_scale", 1.0),
+                flow_shift_max=getattr(args, "flow_shift_max", 80.0),
+            )
         attacked_images = torch.stack(
             [attacked_image1, attacked_image2], dim=1).squeeze(0)
 

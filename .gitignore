@@ -16,3 +16,14 @@ datasets/
 models/_pretrained_weights/
 experiment_data/
 mlruns/
+
+# Experiment runs and artifacts
+experiments/
+*.tar.gz
+*.tar.*
+
+# External tool markers
+.codex
+
+# Diploma review drafts
+Diploma__review_/

@@ -62,26 +62,26 @@ METRICS = [
 PLOT_SPECS = [
     (
         "mean_multitask_robustness_score",
-        "Mean Robustness Score vs Patch Size",
-        "mean robustness score (lower is stronger)",
+        "MRS в зависимости от размера патча",
+        "MRS (меньше = сильнее атака)",
         "mean_robustness_score_vs_size.png",
     ),
     (
         "mean_aee_target_attack",
-        "Flow Target AEE vs Patch Size",
-        "AEE to target flow (lower is stronger)",
+        "AEE до целевого потока в зависимости от размера патча",
+        "AEE до целевого потока (меньше = сильнее)",
         "flow_target_aee_vs_size.png",
     ),
     (
         "mean_mde_rmse_target_attack",
-        "Depth Target RMSE vs Patch Size",
-        "RMSE to target depth (lower is stronger)",
+        "RMSE до целевой глубины в зависимости от размера патча",
+        "RMSE до целевой глубины (меньше = сильнее)",
         "depth_target_rmse_vs_size.png",
     ),
     (
         "mean_iou_target_attack",
-        "Segmentation Target IoU vs Patch Size",
-        "target IoU (higher is stronger)",
+        "IoU целевого класса в зависимости от размера патча",
+        "IoU целевого класса (больше = сильнее)",
         "segmentation_target_iou_vs_size.png",
     ),
 ]
@@ -89,29 +89,29 @@ PLOT_SPECS = [
 GAIN_SPECS = [
     (
         "mean_multitask_robustness_score",
-        "Mean Robustness Score Gain vs Patch Size",
-        "baseline - trained (positive = trained is stronger)",
+        "Выигрыш по MRS в зависимости от размера патча",
+        "baseline - trained (больше = сильнее обученный патч)",
         "gain_mean_robustness_score_vs_size.png",
         "lower",
     ),
     (
         "mean_aee_target_attack",
-        "Flow Target AEE Gain vs Patch Size",
-        "baseline - trained (positive = trained is stronger)",
+        "Выигрыш по AEE до целевого потока",
+        "baseline - trained (больше = сильнее обученный патч)",
         "gain_flow_target_aee_vs_size.png",
         "lower",
     ),
     (
         "mean_mde_rmse_target_attack",
-        "Depth Target RMSE Gain vs Patch Size",
-        "baseline - trained (positive = trained is stronger)",
+        "Выигрыш по RMSE до целевой глубины",
+        "baseline - trained (больше = сильнее обученный патч)",
         "gain_depth_target_rmse_vs_size.png",
         "lower",
     ),
     (
         "mean_iou_target_attack",
-        "Segmentation Target IoU Gain vs Patch Size",
-        "trained - baseline (positive = trained is stronger)",
+        "Выигрыш по IoU целевого класса",
+        "trained - baseline (больше = сильнее обученный патч)",
         "gain_segmentation_target_iou_vs_size.png",
         "higher",
     ),
@@ -462,9 +462,9 @@ def display_label(label: str) -> str:
     base_label = label[:-len("_baseline")] if is_baseline else label
 
     if base_label.startswith("diffusion_"):
-        return "Diffusion baseline" if is_baseline else "Diffusion patch"
+        return "Базовое изображение" if is_baseline else "Диффузионный патч"
     if base_label.startswith("pixel_"):
-        return "Random noise baseline" if is_baseline else "Pixel patch"
+        return "Случайный шум" if is_baseline else "Пиксельный патч"
     return label
 
 
@@ -547,7 +547,7 @@ def plot_metric(rows: list[dict[str, Any]], output_dir: Path, metric: str, title
         ys = [y for _, y in values]
         plt.plot(sizes, ys, marker="o", linewidth=2, label=label)
     plt.title(title)
-    plt.xlabel("patch size, px")
+    plt.xlabel("размер патча, пикс.")
     plt.ylabel(ylabel)
     plt.grid(True, alpha=0.3)
     plt.legend(fontsize=8)
@@ -568,7 +568,7 @@ def plot_gain(rows: list[dict[str, Any]], output_dir: Path, metric: str, title: 
         plt.plot(sizes, ys, marker="o", linewidth=2, label=label)
     plt.axhline(0.0, color="black", linewidth=1, alpha=0.5)
     plt.title(title)
-    plt.xlabel("patch size, px")
+    plt.xlabel("размер патча, пикс.")
     plt.ylabel(ylabel)
     plt.grid(True, alpha=0.3)
     plt.legend(fontsize=8)

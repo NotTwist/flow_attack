@@ -525,6 +525,10 @@ def project_patch_on_scene(
     precomputed_road_mask=None,  # [B,1,H,W] – skip SS forward if provided
     precomputed_planes=None,     # list of (normal, d) – skip plane fitting if provided
     flow_shift=0.0,
+    clean_flow=None,
+    flow_shift_mode="fixed",
+    flow_shift_scale=1.0,
+    flow_shift_max=80.0,
 ):
     """
     Универсальная функция проецирования патча A на дорожную плоскость
@@ -621,10 +625,20 @@ def project_patch_on_scene(
             planes=planes,
             road_masks=road_mask,
             flow_shift=flow_shift,
+            clean_flow=clean_flow,
+            flow_shift_mode=flow_shift_mode,
+            flow_shift_scale=flow_shift_scale,
+            flow_shift_max=flow_shift_max,
         )
     else:
         I1_p, I2_p, M_batch, ys_batch, xs_batch = A(
-            I1_batch, I2_batch, flow_shift=flow_shift)
+            I1_batch, I2_batch,
+            flow_shift=flow_shift,
+            clean_flow=clean_flow,
+            flow_shift_mode=flow_shift_mode,
+            flow_shift_scale=flow_shift_scale,
+            flow_shift_max=flow_shift_max,
+        )
 
     return (
         I1_p,       # patched I1

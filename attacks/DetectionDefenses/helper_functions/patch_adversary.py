@@ -356,8 +356,55 @@ class PatchAdversary(torch.nn.Module):
 
         return I_out, M
 
+    def _flow_shift_from_mask(
+        self,
+        clean_flow,
+        mask,
+        batch_idx=None,
+        *,
+        flow_shift=0.0,
+        flow_shift_mode="fixed",
+        flow_shift_scale=1.0,
+        flow_shift_max=80.0,
+    ):
+        """Return patch center shift (dx, dy) in image pixels."""
+        if flow_shift_mode == "fixed" or clean_flow is None:
+            return 0.0, float(flow_shift)
+
+        if flow_shift_mode != "clean_flow":
+            raise ValueError(f"Unknown flow_shift_mode: {flow_shift_mode}")
+
+        flow = clean_flow
+        if flow.dim() == 5:
+            flow = flow[:, 0]
+        if flow.dim() != 4 or flow.shape[1] != 2:
+            raise ValueError(
+                "clean_flow must have shape [B,2,H,W] or [B,1,2,H,W] "
+                f"for flow_shift_mode=clean_flow, got {tuple(clean_flow.shape)}"
+            )
+        if batch_idx is not None:
+            flow = flow[batch_idx:batch_idx + 1]
+
+        mask_f = mask.float()
+        if mask_f.dim() == 3:
+            mask_f = mask_f.unsqueeze(0)
+        if mask_f.dim() == 4 and mask_f.shape[1] != 1:
+            mask_f = mask_f[:, :1]
+        mask_f = mask_f.to(flow.device)
+        denom = mask_f.sum(dim=(-2, -1)).clamp(min=1.0)
+        dx = (flow[:, 0:1] * mask_f).sum(dim=(-2, -1)) / denom
+        dy = (flow[:, 1:2] * mask_f).sum(dim=(-2, -1)) / denom
+        dx = dx.mean() * float(flow_shift_scale)
+        dy = dy.mean() * float(flow_shift_scale)
+        if flow_shift_max is not None and float(flow_shift_max) > 0:
+            dx = dx.clamp(-float(flow_shift_max), float(flow_shift_max))
+            dy = dy.clamp(-float(flow_shift_max), float(flow_shift_max))
+        return float(dx.detach().cpu()), float(dy.detach().cpu())
+
     def forward(self, I1, I2, y=None, x=None,
-                K=None, planes=None, road_masks=None, flow_shift=0.0):
+                K=None, planes=None, road_masks=None, flow_shift=0.0,
+                clean_flow=None, flow_shift_mode="fixed",
+                flow_shift_scale=1.0, flow_shift_max=80.0):
         if (K is not None) and (planes is not None):
             B, C, H, W = I1.shape
             device = I1.device
@@ -452,8 +499,19 @@ class PatchAdversary(torch.nn.Module):
                         road_mask=road_mask_b
                     )
 
-                    uv_center_f2 = (uv_center[0], uv_center[1] + flow_shift) \
-                        if flow_shift != 0 else uv_center
+                    dx_shift, dy_shift = self._flow_shift_from_mask(
+                        clean_flow,
+                        M_b,
+                        batch_idx=b,
+                        flow_shift=flow_shift,
+                        flow_shift_mode=flow_shift_mode,
+                        flow_shift_scale=flow_shift_scale,
+                        flow_shift_max=flow_shift_max,
+                    )
+                    uv_center_f2 = (
+                        uv_center[0] + dx_shift,
+                        uv_center[1] + dy_shift,
+                    ) if (dx_shift != 0 or dy_shift != 0) else uv_center
                     I2_p_b, _ = self._project_single_on_plane(
                         image=I2[b],
                         patch=P_tex,
@@ -559,6 +617,13 @@ class PatchAdversary(torch.nn.Module):
         # Initialize pos, patch, and patch size
         N, C, H, W = I1.size()
         n, c, h, w = P_res.size()
+        # EoT upscaling can push the patch beyond image bounds; clamp to fit
+        if h > H or w > W:
+            new_h = min(h, H)
+            new_w = min(w, W)
+            P_res = tvf.resize(P_res, (new_h, new_w))
+            M = tvf.resize(M, (new_h, new_w))
+            n, c, h, w = P_res.size()
         assert H >= h and W >= w, "Patch size must be smaller than image size"
 
         if self.random_location:
@@ -580,18 +645,32 @@ class PatchAdversary(torch.nn.Module):
         # Construct result (replace image where patch is not transparent)
         R1 = (1 - M_glob) * I1 + P_glob_cov * M_glob
 
-        if flow_shift != 0:
-            y2 = y + int(round(flow_shift))
-            y2 = max(h // 2, min(H - h // 2 - 1, y2))
-            P_glob2 = pad(P_res, ((x - w // 2), W - w - (x - w // 2),
-                         (y2 - h // 2), H - h - (y2 - h // 2)))
-            M_glob2 = pad(M, ((x - w // 2), W - w - (x - w // 2),
-                         (y2 - h // 2), H - h - (y2 - h // 2)))
-            P_glob_cov2 = torch.clamp(P_glob2, 0.0, 1.0)
-            M_glob2 = torch.ceil(M_glob2)
-            R2 = (1 - M_glob2) * I2 + P_glob_cov2 * M_glob2
-        else:
+        if flow_shift_mode == "fixed" and flow_shift == 0:
             R2 = (1 - M_glob) * I2 + P_glob_cov * M_glob
+        else:
+            R2_list = []
+            for b in range(N):
+                dx_shift, dy_shift = self._flow_shift_from_mask(
+                    clean_flow,
+                    M_glob,
+                    batch_idx=b,
+                    flow_shift=flow_shift,
+                    flow_shift_mode=flow_shift_mode,
+                    flow_shift_scale=flow_shift_scale,
+                    flow_shift_max=flow_shift_max,
+                )
+                x2 = x + int(round(dx_shift))
+                y2 = y + int(round(dy_shift))
+                x2 = max(w // 2, min(W - w // 2 - 1, x2))
+                y2 = max(h // 2, min(H - h // 2 - 1, y2))
+                P_glob2 = pad(P_res, ((x2 - w // 2), W - w - (x2 - w // 2),
+                             (y2 - h // 2), H - h - (y2 - h // 2)))
+                M_glob2 = pad(M, ((x2 - w // 2), W - w - (x2 - w // 2),
+                             (y2 - h // 2), H - h - (y2 - h // 2)))
+                P_glob_cov2 = torch.clamp(P_glob2, 0.0, 1.0)
+                M_glob2 = torch.ceil(M_glob2)
+                R2_list.append((1 - M_glob2[0]) * I2[b] + P_glob_cov2[0] * M_glob2[0])
+            R2 = torch.stack(R2_list, dim=0)
 
         M_out = torch.where(M_glob > 0, 1, 0).to(I1.device)
 

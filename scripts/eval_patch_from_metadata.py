@@ -37,6 +37,7 @@ VALUE_FLAGS = {
     "y_scale": "--y_scale",
     "flow_shift": "--flow_shift",
     "flow_target_magnitude": "--flow_target_magnitude",
+    "flow_target_angle_deg": "--flow_target_angle_deg",
     "down_loss": "--down_loss",
     "down_hinge_min_mag_ratio": "--down_hinge_min_mag_ratio",
     "down_hinge_horizontal_weight": "--down_hinge_horizontal_weight",

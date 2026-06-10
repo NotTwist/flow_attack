@@ -21,9 +21,11 @@ RUNS = {
     "qualitative": REPO_ROOT / "experiment_data" / "qualitative_artifacts_kitti15_patch150",
 }
 
+DIFFUSION_BASE_IMAGE = REPO_ROOT / "test_assets" / "dog.jpg"
+
 PATCH_EXAMPLES = [
     (
-        "Diffusion baseline",
+        "Базовое изображение",
         REPO_ROOT
         / "experiment_data"
         / "patch_baseline_gain_kitti15_no_projection"
@@ -32,7 +34,7 @@ PATCH_EXAMPLES = [
         / "baseline_patch.png",
     ),
     (
-        "Diffusion trained",
+        "Диффузионный патч",
         REPO_ROOT
         / "experiment_data"
         / "patch_baseline_gain_kitti15_no_projection"
@@ -41,7 +43,7 @@ PATCH_EXAMPLES = [
         / "evaluated_patch.png",
     ),
     (
-        "Pixel baseline",
+        "Случайный шум",
         REPO_ROOT
         / "experiment_data"
         / "patch_baseline_gain_kitti15_no_projection"
@@ -50,7 +52,7 @@ PATCH_EXAMPLES = [
         / "baseline_patch.png",
     ),
     (
-        "Pixel trained",
+        "Пиксельный патч",
         REPO_ROOT
         / "experiment_data"
         / "patch_baseline_gain_kitti15_no_projection"
@@ -92,7 +94,7 @@ def save_bar_group(
 
     fig, ax = plt.subplots(figsize=figsize)
     if include_flow_target:
-        metrics = [("mrs", "MRS"), ("flow_target", "Flow target AEE")]
+        metrics = [("mrs", "MRS"), ("flow_target", "AEE до цели")]
         width = 0.34
         colors = ["#2f6f9f", "#d2784b"]
         for idx, (key, display) in enumerate(metrics):
@@ -101,12 +103,12 @@ def save_bar_group(
             bars = ax.bar(x + offset, values, width, label=display, color=colors[idx])
             ax.bar_label(bars, fmt="%.3f", fontsize=8, padding=2)
         ax.legend(frameon=False, ncols=2, fontsize=8, loc="upper center", bbox_to_anchor=(0.5, -0.12))
-        ax.set_ylabel("Metric value (lower = stronger attack)")
+        ax.set_ylabel("Значение метрики (меньше = сильнее атака)")
     else:
         values = [data[label]["mrs"] for label in labels]
         bars = ax.bar(x, values, width=0.55, color="#2f6f9f")
         ax.bar_label(bars, fmt="%.3f", fontsize=8, padding=2)
-        ax.set_ylabel("MRS (lower = stronger attack)")
+        ax.set_ylabel("MRS (меньше = сильнее атака)")
 
     ax.set_title(title, fontsize=12)
     ax.set_xticks(x)
@@ -190,9 +192,28 @@ def make_contact_sheet(
 def build_qualitative_grid() -> None:
     items = []
     frame = "eval_0001"
+    crop_dir = FIG_DIR / "qualitative_crops"
+    crop_dir.mkdir(parents=True, exist_ok=True)
+    kind_labels = {"diffusion": "диффузия", "pixel": "пиксельный"}
+    if DIFFUSION_BASE_IMAGE.exists():
+        Image.open(DIFFUSION_BASE_IMAGE).convert("RGB").save(crop_dir / "diffusion_base_image.png")
     for kind in ("diffusion", "pixel"):
         kind_dir = RUNS["qualitative"] / kind
         mask_path = kind_dir / f"{frame}_patch_mask.png"
+        bbox, mask_size = mask_bbox(mask_path, pad=130)
+
+        patch = Image.open(kind_dir / "evaluated_patch.png").convert("RGB")
+        patch.save(crop_dir / f"{kind}_patch.png")
+
+        for artifact in ("image", "flow", "depth", "ss"):
+            for state in ("clean", "attacked"):
+                src = kind_dir / f"{frame}_{state}_{artifact}.png"
+                crop = crop_to_bbox(src, bbox, mask_size)
+                crop.save(crop_dir / f"{kind}_{artifact}_{state}_crop.png")
+            clean_crop = Image.open(crop_dir / f"{kind}_{artifact}_clean_crop.png").convert("RGB")
+            attacked_crop = Image.open(crop_dir / f"{kind}_{artifact}_attacked_crop.png").convert("RGB")
+            horizontal_pair(clean_crop, attacked_crop).save(crop_dir / f"{kind}_{artifact}_pair_crop.png")
+
         image_pair = crop_pair_around_mask(
             kind_dir / f"{frame}_clean_image.png",
             kind_dir / f"{frame}_attacked_image.png",
@@ -219,10 +240,10 @@ def build_qualitative_grid() -> None:
         )
         items.extend(
             [
-                (f"{kind}: image", image_pair),
-                (f"{kind}: flow", flow_pair),
-                (f"{kind}: depth", depth_pair),
-                (f"{kind}: seg.", seg_pair),
+                (f"{kind_labels[kind]}: кадр", image_pair),
+                (f"{kind_labels[kind]}: поток", flow_pair),
+                (f"{kind_labels[kind]}: глубина", depth_pair),
+                (f"{kind_labels[kind]}: сегм.", seg_pair),
             ]
         )
     make_contact_sheet(
@@ -285,8 +306,8 @@ def horizontal_pair(left_path: Path, right_path: Path) -> Image.Image:
 def build_patch_sheets() -> None:
     make_contact_sheet(
         [
-            ("no projection", RUNS["projection"] / "no_projection" / "evaluated_patch.png"),
-            ("projection", RUNS["projection"] / "projection" / "evaluated_patch.png"),
+            ("без проекции", RUNS["projection"] / "no_projection" / "evaluated_patch.png"),
+            ("с проекцией", RUNS["projection"] / "projection" / "evaluated_patch.png"),
         ],
         FIG_DIR / "projection_patch_contact_sheet.png",
         columns=2,
@@ -303,11 +324,11 @@ def build_patch_sheets() -> None:
     )
     make_contact_sheet(
         [
-            ("none", RUNS["tv_nps"] / "none" / "evaluated_patch.png"),
-            ("TV only", RUNS["tv_nps"] / "tv_only" / "evaluated_patch.png"),
-            ("NPS only", RUNS["tv_nps"] / "nps_only" / "evaluated_patch.png"),
+            ("без рег.", RUNS["tv_nps"] / "none" / "evaluated_patch.png"),
+            ("только TV", RUNS["tv_nps"] / "tv_only" / "evaluated_patch.png"),
+            ("только NPS", RUNS["tv_nps"] / "nps_only" / "evaluated_patch.png"),
             ("TV + NPS", RUNS["tv_nps"] / "both" / "evaluated_patch.png"),
-            ("strong", RUNS["tv_nps"] / "strong_both" / "evaluated_patch.png"),
+            ("сильная рег.", RUNS["tv_nps"] / "strong_both" / "evaluated_patch.png"),
         ],
         FIG_DIR / "tv_nps_patch_contact_sheet.png",
         columns=5,
@@ -333,7 +354,7 @@ def save_projection_task_bar(
 ) -> None:
     # Per-task MRS (lower = stronger attack); no_proj values consistent with
     # main results table (diffusion overall MRS ≈ 0.566); projection slightly worse.
-    tasks = ["Flow", "Depth", "Segmentation"]
+    tasks = ["Поток", "Глубина", "Сегментация"]
     no_proj = [0.502, 0.583, 0.712]
     proj    = [0.598, 0.648, 0.668]
 
@@ -341,15 +362,15 @@ def save_projection_task_bar(
     width = 0.32
     fig, ax = plt.subplots(figsize=figsize)
 
-    bars_no = ax.bar(x - width / 2, no_proj, width, label="no projection", color="#2f6f9f")
-    bars_pr = ax.bar(x + width / 2, proj,    width, label="projection",    color="#d2784b")
+    bars_no = ax.bar(x - width / 2, no_proj, width, label="без проекции", color="#2f6f9f")
+    bars_pr = ax.bar(x + width / 2, proj,    width, label="с проекцией",    color="#d2784b")
     ax.bar_label(bars_no, fmt="%.3f", fontsize=8, padding=2)
     ax.bar_label(bars_pr, fmt="%.3f", fontsize=8, padding=2)
 
     ax.set_title(title, fontsize=12)
     ax.set_xticks(x)
     ax.set_xticklabels(tasks)
-    ax.set_ylabel("MRS per task (lower = stronger attack)")
+    ax.set_ylabel("MRS по задачам (меньше = сильнее атака)")
     ax.grid(axis="y", color="#d9d9d9", linewidth=0.7, alpha=0.8)
     ax.set_axisbelow(True)
     ax.legend(frameon=False, ncols=2, fontsize=9, loc="upper center", bbox_to_anchor=(0.5, -0.14))
@@ -377,27 +398,27 @@ def main() -> None:
     }
     save_bar_group(
         down_loss_data,
-        "Down-target loss ablation on KITTI15 subset",
+        "Сравнение потерь для целевого потока вниз",
         "down_loss_ablation",
         include_flow_target=True,
     )
 
     tv_nps_data = {
-        "none": read_metrics(RUNS["tv_nps"] / "none.log"),
-        "TV only": read_metrics(RUNS["tv_nps"] / "tv_only.log"),
-        "NPS only": read_metrics(RUNS["tv_nps"] / "nps_only.log"),
+        "без регуляризации": read_metrics(RUNS["tv_nps"] / "none.log"),
+        "только TV": read_metrics(RUNS["tv_nps"] / "tv_only.log"),
+        "только NPS": read_metrics(RUNS["tv_nps"] / "nps_only.log"),
         "TV+NPS": read_metrics(RUNS["tv_nps"] / "both.log"),
-        "strong": read_metrics(RUNS["tv_nps"] / "strong_both.log"),
+        "сильная TV+NPS": read_metrics(RUNS["tv_nps"] / "strong_both.log"),
     }
     save_bar_group(
         tv_nps_data,
-        "TV/NPS ablation for diffusion patch",
+        "Влияние TV/NPS-регуляризации на диффузионный патч",
         "tv_nps_ablation_diffusion",
         figsize=(8.4, 4.0),
     )
 
     save_projection_task_bar(
-        "Projection ablation (diffusion patch, KITTI15 subset)",
+        "Влияние проекции на дорожную плоскость",
         "projection_vs_no_projection_ablation",
     )
 
